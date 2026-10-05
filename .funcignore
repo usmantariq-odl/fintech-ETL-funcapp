@@ -1,0 +1,10 @@
+.git/
+.vscode/
+bin/
+obj/
+publish/
+backlog-runs/
+*.log
+*.zip
+local.settings.json
+azure-app-settings.local.json

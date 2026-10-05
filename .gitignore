@@ -1,0 +1,14 @@
+bin/
+obj/
+local.settings.json
+azure-app-settings.local.json
+*.user
+backlog-runs/
+backlog-sample.log
+parallel-scan.log
+parallel-live.log
+parallel-only4.log
+fixed-worker-scan.log
+full-inventory.log
+publish/
+fintech-etl-net10.zip
