@@ -19,23 +19,28 @@ public sealed class EtlTimer
     public EtlTimer(ILogger<EtlTimer> logger) => this.logger = logger;
 
     [Function("FintechEtlTimer")]
-    public void Run([TimerTrigger("0 */3 * * * *", RunOnStartup = false)] TimerInfo timer)
+    public void Run([TimerTrigger("0 */3 * * * *", RunOnStartup = false)] TimerInfo timer, CancellationToken cancellationToken = default)
     {
+        LastRunFailed = 0;
         var settings = EtlSettings.Load();
-        logger.LogInformation("Scanning Azure SFTP with {Workers} ETL workers; SQL database: FintechStressTesting; dry run: {DryRun}",
-            settings.WorkerCount, settings.DryRun);
+        if (!settings.DryRun) SqlSchemaVerifier.Verify(settings.SqlConnectionString);
+        logger.LogInformation("Scanning Azure SFTP with {Workers} ETL workers; SQL database: {Database}; dry run: {DryRun}",
+            settings.WorkerCount, EtlSettings.ExpectedSqlCatalog, settings.DryRun);
 
         string[] sites;
         using (var discovery = CreateSftp(settings))
         {
             discovery.Connect();
-            sites = discovery.ListDirectory("/")
-                .Where(site => site.IsDirectory && site.Name.Length > 0
-                    && site.Name.All(c => c >= '0' && c <= '9')
-                    && int.TryParse(site.Name, out var siteId) && siteId > 0)
+            sites = (discovery.Exists(SftpLayout.UnprocessedRoot)
+                ? discovery.ListDirectory(SftpLayout.UnprocessedRoot) : [])
+                .Where(site => site.IsDirectory && SftpLayout.IsSiteId(site.Name))
                 .Select(site => site.Name)
                 .OrderBy(name => name, StringComparer.Ordinal)
                 .ToArray();
+            if (!string.IsNullOrEmpty(settings.MagLinkRoot) && discovery.Exists(settings.MagLinkRoot))
+                sites = sites.Concat(discovery.ListDirectory(settings.MagLinkRoot)
+                    .Where(s => s.IsDirectory && s.Name.All(c => c >= '0' && c <= '9') && int.TryParse(s.Name, out var id) && id > 0)
+                    .Select(s => s.Name)).Distinct(StringComparer.Ordinal).OrderBy(s => s, StringComparer.Ordinal).ToArray();
         }
 
         var localRun = Environment.GetEnvironmentVariable("EtlLocalRun") == "true";
@@ -59,7 +64,7 @@ public sealed class EtlTimer
         var workers = Enumerable.Range(0, workerCount).Select(workerNumber => Task.Run(() =>
         {
             using var worker = new WorkerState(CreateSftp(settings),
-                settings.DryRun ? null : new FtpConnectivity(LegacyLog));
+                settings.DryRun ? null : new FtpConnectivity(LegacyLog), () => CreateSftp(settings, settings.ConUsername));
             logger.LogInformation("ETL site worker {WorkerNumber} started", workerNumber + 1);
             if (localRun) Console.WriteLine($"ETL site worker {workerNumber + 1} started");
 
@@ -67,54 +72,74 @@ public sealed class EtlTimer
             {
                 var index = Interlocked.Increment(ref nextSite);
                 if (index >= sites.Length) break;
-                ProcessSite(worker, sites[index], settings, counters, maxFiles, localRun, watch, runBudget);
+                cancellationToken.ThrowIfCancellationRequested();
+                ProcessSite(worker, sites[index], settings, counters, maxFiles, localRun, watch, runBudget, cancellationToken);
             }
         })).ToArray();
         Task.WaitAll(workers);
 
         if (watch.Elapsed >= runBudget)
-            logger.LogWarning("Run budget reached; remaining ZIPs will be picked up by the next timer run");
-        logger.LogInformation("Scan complete: {Found} ZIPs found, {Processed} processed, {Regenerated} regenerated, {NotConfigured} not configured, {Invalid} invalid, {Failed} failed or left for retry",
+            logger.LogWarning("Run budget reached; remaining files will be picked up by the next timer run");
+        logger.LogInformation("Scan complete: {Found} files found, {Processed} processed, {Regenerated} regenerated, {NotConfigured} not configured, {Invalid} invalid, {Failed} failed or left for retry",
             counters.Found, counters.Processed, counters.Regenerated, counters.NotConfigured, counters.Invalid, counters.Failed);
         LastRunFailed = counters.Failed;
         if (localRun)
-            Console.WriteLine($"{(settings.DryRun ? "Dry run" : "Live run")}: {counters.Found} ZIPs found, {counters.Processed} processed, {counters.NotConfigured} not configured, {counters.Invalid} invalid, {counters.Failed} failed or left for retry.");
+            Console.WriteLine($"{(settings.DryRun ? "Dry run" : "Live run")}: {counters.Found} files found, {counters.Processed} processed, {counters.NotConfigured} not configured, {counters.Invalid} invalid, {counters.Failed} failed or left for retry.");
     }
 
     private void ProcessSite(WorkerState worker, string site, EtlSettings settings, RunCounters counters,
-        int maxFiles, bool localRun, Stopwatch watch, TimeSpan runBudget)
+        int maxFiles, bool localRun, Stopwatch watch, TimeSpan runBudget, CancellationToken cancellationToken)
     {
-        var input = $"/{site}/input";
+        var input = SftpLayout.Input(site);
         var sftp = worker.Sftp;
         try
         {
             EnsureConnected(sftp);
-            if (!sftp.Exists(input)) return;
-            var zipFiles = sftp.ListDirectory(input)
-                .Where(item => item.IsRegularFile && item.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
-                    && !item.Name.Contains(".part-", StringComparison.OrdinalIgnoreCase))
-                .OrderBy(item => item.Name, StringComparer.Ordinal)
-                .ToList();
-            if (zipFiles.Count == 0) return;
-            foreach (var item in zipFiles)
+            using var lease = settings.DryRun ? null : SiteLease.TryAcquire(settings.SqlConnectionString, site);
+            if (!settings.DryRun && lease == null)
             {
+                logger.LogInformation("Site {Site} is already being processed; skipping this cycle", site);
+                return;
+            }
+            if (!settings.DryRun && sftp.Exists(SftpLayout.SiteRoot(site)))
+            {
+                EnsureDirectory(sftp, input);
+                EnsureDirectory(sftp, SftpLayout.Output(site));
+            }
+            var candidates = new List<(Renci.SshNet.Sftp.ISftpFile File, bool MagLink)>();
+            if (sftp.Exists(input)) candidates.AddRange(sftp.ListDirectory(input)
+                .Where(item => item.IsRegularFile && ArchiveFiles.IsSupported(item.Name)).Select(item => (item, false)));
+            var magLinkInput = $"{settings.MagLinkRoot}/{site}";
+            if (!string.IsNullOrEmpty(settings.MagLinkRoot) && sftp.Exists(magLinkInput))
+                candidates.AddRange(sftp.ListDirectory(magLinkInput)
+                    .Where(item => item.IsRegularFile && ArchiveFiles.IsMagLink(item.Name)).Select(item => (item, true)));
+            var files = candidates
+                .Where(candidate => !candidate.File.Name.Contains(".part-", StringComparison.OrdinalIgnoreCase)
+                    && DateTime.UtcNow - candidate.File.LastWriteTimeUtc >= TimeSpan.FromSeconds(settings.MinimumFileAgeSeconds))
+                .OrderBy(candidate => candidate.File.Name, StringComparer.Ordinal)
+                .ToList();
+            foreach (var candidate in files)
+            {
+                var item = candidate.File;
+                cancellationToken.ThrowIfCancellationRequested();
+                lease?.Verify();
                 if (watch.Elapsed >= runBudget || !counters.TryTakeFile(maxFiles)) break;
-                if (!IsValidArchiveName(site, item.Name))
+                if (!candidate.MagLink && !ArchiveFiles.IsValidName(site, item.Name))
                 {
                     if (settings.DryRun)
-                        logger.LogInformation("Dry run: would move invalid ZIP {Path} to /invalidFile/{Site}/", item.FullName, site);
+                        logger.LogInformation("Dry run: would move invalid archive {Path} to /invalidFile/{Site}/", item.FullName, site);
                     else
                     {
                         try
                         {
                             var invalid = MoveToArchive(sftp, item.FullName, "invalidFile", site, item.Name);
                             counters.IncrementInvalid();
-                            logger.LogWarning("Invalid ZIP name {Input}; moved to {Destination}", item.FullName, invalid);
+                            logger.LogWarning("Invalid archive name {Input}; moved to {Destination}", item.FullName, invalid);
                         }
                         catch (Exception ex)
                         {
                             counters.IncrementFailed();
-                            logger.LogError(ex, "Could not archive invalid ZIP {Path}; input remains for retry", item.FullName);
+                            logger.LogError(ex, "Could not archive invalid archive {Path}; input remains for retry", item.FullName);
                         }
                     }
                     continue;
@@ -129,36 +154,60 @@ public sealed class EtlTimer
                 Directory.CreateDirectory(workDir);
                 try
                 {
-                    var localZip = Path.Combine(workDir, item.Name);
-                    using (var local = File.Create(localZip)) sftp.DownloadFile(item.FullName, local);
-                    FtpConnectivity.ZipResult result;
-                    try { result = worker.Processor!.ProcessZip(localZip, item.FullName, site); }
-                    catch (Exception ex) when (ex is not SqlException && ex is not SshConnectionException)
+                    if (item.Length > ArchiveFiles.MaxTotalBytes)
                     {
-                        var exceptionPath = MoveToArchive(sftp, item.FullName, "ExceptionFile", site, item.Name);
+                        MoveToArchive(sftp, item.FullName, candidate.MagLink ? "MagLinkException" : "ExceptionFile", site, item.Name);
+                        counters.IncrementFailed();
+                        logger.LogError("Input {Path} exceeds the file size limit; archived for investigation", item.FullName);
+                        continue;
+                    }
+                    var localArchive = Path.Combine(workDir, item.Name);
+                    using (var local = File.Create(localArchive)) sftp.DownloadFile(item.FullName, local);
+                    var afterDownload = sftp.GetAttributes(item.FullName);
+                    if (afterDownload.Size != item.Length || afterDownload.LastWriteTimeUtc != item.LastWriteTimeUtc
+                        || new FileInfo(localArchive).Length != item.Length)
+                        throw new RetryableEtlException("Input changed during download.");
+                    EtlOutcome outcome;
+                    try
+                    {
+                        outcome = candidate.MagLink ? worker.Processor!.ProcessMagLink(localArchive, item.FullName, site)
+                            : worker.Processor!.ProcessArchive(localArchive, item.FullName, site, file =>
+                            {
+                                if (settings.ConDestinations.Length == 0)
+                                    throw new RetryableEtlException("CON file found but ConSftpDestinations is not configured; input retained.");
+                                try
+                                {
+                                    worker.DeliverCon(file, settings.ConDestinations);
+                                }
+                                catch (Exception ex) { throw new RetryableEtlException("CON delivery failed; input retained.", ex); }
+                            });
+                    }
+                    catch (Exception ex) when (!FtpConnectivity.IsRetryable(ex) && ex is not SshException)
+                    {
+                        var exceptionPath = MoveToArchive(sftp, item.FullName, candidate.MagLink ? "MagLinkException" : "ExceptionFile", site, item.Name);
                         counters.IncrementFailed();
                         logger.LogError(ex, "ETL processing failed for {Input}; moved to {Destination}", item.FullName, exceptionPath);
                         if (localRun) Console.Error.WriteLine($"Failed {item.FullName}: {ex}");
                         continue;
                     }
 
-                    if (result == FtpConnectivity.ZipResult.Regenerated)
-                    {
-                        var regeneratedCopy = CopyToArchive(sftp, localZip, "RegeneratedFile", site, item.Name);
-                        logger.LogInformation("Copied regenerated ZIP {Input} -> {Destination}", item.FullName, regeneratedCopy);
-                    }
-                    var folder = result == FtpConnectivity.ZipResult.NotConfigured ? "notconfigured" : "ProcessedFile";
-                    var destination = MoveToArchive(sftp, item.FullName, folder, site, item.Name);
-                    logger.LogInformation("{Result} {Input} -> {Destination}", result, item.FullName, destination);
-                    if (localRun) Console.WriteLine($"{result} {item.FullName} -> {destination}");
-                    if (result == FtpConnectivity.ZipResult.NotConfigured) counters.IncrementNotConfigured();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    lease?.Verify();
+                    ArchivePublisher.Publish(outcome, localArchive,
+                        output => CopyToArchive(sftp, output.LocalPath, output.Folder, site, item.Name),
+                        output => MoveToArchive(sftp, item.FullName, output.Folder, site, item.Name),
+                        () => sftp.DeleteFile(item.FullName));
+                    logger.LogInformation("{Result} {Input}; outputs: {Folders}", outcome.Result, item.FullName, string.Join(", ", outcome.Outputs.Select(o => o.Folder)));
+                    if (localRun) Console.WriteLine($"{outcome.Result} {item.FullName}");
+                    if (outcome.Result == EtlResult.NotConfigured) counters.IncrementNotConfigured();
+                    else if (outcome.Result is EtlResult.Failed or EtlResult.Partial) counters.IncrementFailed();
                     else
                     {
                         counters.IncrementProcessed();
-                        if (result == FtpConnectivity.ZipResult.Regenerated) counters.IncrementRegenerated();
+                        if (outcome.Result == EtlResult.Regenerated) counters.IncrementRegenerated();
                     }
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     counters.IncrementFailed();
                     logger.LogError(ex, "Could not finish {Path}; input remains for retry", item.FullName);
@@ -176,7 +225,7 @@ public sealed class EtlTimer
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             counters.IncrementFailed();
             logger.LogError(ex, "Could not scan site {Site}", site);
@@ -185,9 +234,9 @@ public sealed class EtlTimer
         }
     }
 
-    private static SftpClient CreateSftp(EtlSettings settings)
+    private static SftpClient CreateSftp(EtlSettings settings, string username = null)
     {
-        var sftp = new SftpClient(settings.Host, settings.Port, settings.Username, settings.Password)
+        var sftp = new SftpClient(settings.Host, settings.Port, username ?? settings.Username, settings.Password)
         {
             OperationTimeout = TimeSpan.FromSeconds(60),
             KeepAliveInterval = TimeSpan.FromSeconds(30)
@@ -212,22 +261,9 @@ public sealed class EtlTimer
         catch { /* The next site will open a fresh session. */ }
     }
 
-    // The legacy ETL used the first six filename digits as the site ID. Match the
-    // whole folder ID here so numeric site IDs of other lengths remain supported.
-    // A timestamp is required only for regenerated ZIPs by the ETL processor.
-    private static bool IsValidArchiveName(string site, string name)
-    {
-        return name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
-            && name.Length > site.Length + 4
-            && name.StartsWith(site, StringComparison.Ordinal);
-    }
-
     private static void EnsureArchiveDirectory(SftpClient sftp, string folder, string site)
     {
-        var root = $"/{folder}";
-        if (!sftp.Exists(root)) sftp.CreateDirectory(root);
-        var siteFolder = $"{root}/{site}";
-        if (!sftp.Exists(siteFolder)) sftp.CreateDirectory(siteFolder);
+        EnsureDirectory(sftp, $"/{folder}/{site}");
     }
 
     private static string MoveToArchive(SftpClient sftp, string source, string folder, string site, string name)
@@ -256,6 +292,42 @@ public sealed class EtlTimer
         }
     }
 
+    private static void EnsureDirectory(SftpClient sftp, string directory)
+    {
+        var current = string.Empty;
+        foreach (var segment in directory.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            current += "/" + segment;
+            if (!sftp.Exists(current))
+            {
+                try { sftp.CreateDirectory(current); }
+                catch (SshException) when (sftp.Exists(current)) { /* Another worker created it. */ }
+            }
+        }
+    }
+
+    internal static void PrepareConFolders(EtlSettings settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings.ConUsername)) throw new InvalidOperationException("ConSftpUsername is required to prepare the CON container.");
+        using var sftp = CreateSftp(settings, settings.ConUsername);
+        sftp.Connect();
+        ConFileDelivery.PrepareFolders(new SftpConFileStore(sftp));
+        Console.WriteLine("CON folder structure prepared: " + string.Join(", ", ConFileDelivery.Folders));
+    }
+
+    private sealed class SftpConFileStore(SftpClient sftp) : IConFileStore
+    {
+        public bool Exists(string path) => sftp.Exists(path);
+        public void EnsureDirectory(string path) => EtlTimer.EnsureDirectory(sftp, path);
+        public void Upload(string localFile, string remotePath)
+        {
+            using var source = File.OpenRead(localFile);
+            sftp.UploadFile(source, remotePath, false);
+        }
+        public void Rename(string source, string destination) => RenameWithRetry(sftp, source, destination);
+        public void Delete(string path) => sftp.DeleteFile(path);
+    }
+
     private static string GetUniqueArchivePath(SftpClient sftp, string folder, string site, string name)
     {
         var siteFolder = $"/{folder}/{site}";
@@ -264,11 +336,9 @@ public sealed class EtlTimer
         {
             var duplicateFolder = $"{siteFolder}/duplicate";
             if (!sftp.Exists(duplicateFolder)) sftp.CreateDirectory(duplicateFolder);
-            var stem = Path.GetFileNameWithoutExtension(name);
-            var extension = Path.GetExtension(name);
             destination = $"{duplicateFolder}/{name}";
             for (var index = 1; sftp.Exists(destination); index++)
-                destination = $"{duplicateFolder}/{stem}_{index}{extension}";
+                destination = $"{duplicateFolder}/{ArchiveFiles.DuplicateName(name, index)}";
         }
         return destination;
     }
@@ -293,11 +363,25 @@ public sealed class EtlTimer
         }
     }
 
-    private sealed class WorkerState(SftpClient sftp, FtpConnectivity processor) : IDisposable
+    private sealed class WorkerState(SftpClient sftp, FtpConnectivity processor, Func<SftpClient> createConSftp) : IDisposable
     {
+        private SftpClient conSftp;
+        private bool conFoldersPrepared;
         public SftpClient Sftp { get; } = sftp;
         public FtpConnectivity Processor { get; } = processor;
-        public void Dispose() => Sftp.Dispose();
+        public void DeliverCon(string file, IEnumerable<string> destinations)
+        {
+            conSftp ??= createConSftp();
+            EnsureConnected(conSftp);
+            var store = new SftpConFileStore(conSftp);
+            if (!conFoldersPrepared)
+            {
+                ConFileDelivery.PrepareFolders(store);
+                conFoldersPrepared = true;
+            }
+            foreach (var destination in destinations) ConFileDelivery.Deliver(store, file, destination);
+        }
+        public void Dispose() { conSftp?.Dispose(); Sftp.Dispose(); }
     }
 
     private sealed class RunCounters

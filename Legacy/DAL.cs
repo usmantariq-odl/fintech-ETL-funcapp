@@ -17,10 +17,6 @@ namespace CSVReader
         public static string connectToDb = "";
         public static string secondaryDbConnectionString = "";
         public static bool enableDualInsert = false;
-        private string SQLDateTimeFormat = "yyyy-MM-dd HH:mm:ss.fff";
-
-        private string SQLDateFormat = "yyyy-MM-dd";
-        private string SQLTimeFormat = "HH:mm:ss.fff";
 
         private const string URL = "http://fintechpythoniotpublisher.azurewebsites.net/sendJSON/";
 
@@ -90,6 +86,7 @@ namespace CSVReader
             }
             catch (Exception ex)
             {
+                    if (ex is SqlException) throw;
                 logger.Error($"Failed to create 'dups' directory: {ex.Message}", ex);
             }
         }
@@ -121,6 +118,7 @@ namespace CSVReader
             }
             catch (Exception ex)
             {
+                    if (ex is SqlException) throw;
                 logger.Error($"Unexpected error writing duplicate {recordType} to {fileName}: {ex.Message}", ex);
             }
         }
@@ -128,22 +126,38 @@ namespace CSVReader
         public string GetProcessedFileStatus(string remotePath)
         {
             using (var con = new SqlConnection(connectToDb))
-            using (var cmd = new SqlCommand(@"SELECT TOP 1 Status FROM Fintech_ProcessedFiles WITH (INDEX(IX_Fintech_ProcessedFiles_Path_FileName_ID), FORCESEEK)
-                WHERE [Path] = @Path AND FileName = @FileName ORDER BY ID DESC", con))
+            using (var cmd = new SqlCommand(@"SELECT TOP 1 Status FROM Fintech_ProcessedFiles
+                WHERE [Path] IN (@Path, @LegacyPath, @PreviousPath, @PreviousLegacyPath) AND FileName = @FileName ORDER BY ID DESC", con))
             {
-                cmd.Parameters.Add("@Path", SqlDbType.VarChar, 1000).Value = Path.GetDirectoryName(remotePath.Replace('/', Path.DirectorySeparatorChar));
-                cmd.Parameters.Add("@FileName", SqlDbType.VarChar, 255).Value = Path.GetFileName(remotePath);
+                var key = RemoteFileKey(remotePath);
+                cmd.Parameters.Add("@Path", SqlDbType.VarChar, 1000).Value = key.Directory;
+                cmd.Parameters.Add("@LegacyPath", SqlDbType.VarChar, 1000).Value = key.Directory.Replace('/', '\\');
+                var previousDirectory = SftpLayout.PreviousInputDirectory(key.Directory);
+                cmd.Parameters.Add("@PreviousPath", SqlDbType.VarChar, 1000).Value = previousDirectory;
+                cmd.Parameters.Add("@PreviousLegacyPath", SqlDbType.VarChar, 1000).Value = previousDirectory.Replace('/', '\\');
+                cmd.Parameters.Add("@FileName", SqlDbType.VarChar, 255).Value = key.Name;
                 con.Open();
                 return cmd.ExecuteScalar() as string;
             }
         }
 
+        internal static (string Directory, string Name) RemoteFileKey(string remotePath)
+        {
+            var normalized = remotePath.Replace('\\', '/');
+            var separator = normalized.LastIndexOf('/');
+            var directory = separator < 0 ? string.Empty : normalized[..separator];
+            var name = normalized[(separator + 1)..];
+            if (directory.Length > 1000 || name.Length > 255)
+                throw new InvalidDataException("File identity exceeds Fintech_ProcessedFiles column limits.");
+            return (directory, name);
+        }
+
         public int EnsureProcessedFileRecord(string filePath, string fileType, string remotePath = null)
         {
             string fullPath = Path.GetFullPath(filePath);
-            string directoryPath = remotePath == null ? Path.GetDirectoryName(fullPath) ?? string.Empty
-                : Path.GetDirectoryName(remotePath.Replace('/', Path.DirectorySeparatorChar)) ?? string.Empty;
-            string fileName = Path.GetFileName(fullPath);
+            var key = remotePath == null ? (Path.GetDirectoryName(fullPath) ?? string.Empty, Path.GetFileName(fullPath)) : RemoteFileKey(remotePath);
+            string directoryPath = key.Item1;
+            string fileName = key.Item2;
             long fileSize = File.Exists(fullPath) ? new FileInfo(fullPath).Length : 0;
 
             using (SqlConnection con = new SqlConnection(connectToDb))
@@ -152,11 +166,15 @@ namespace CSVReader
 
                 using (SqlCommand existingCmd = new SqlCommand(@"
                     SELECT TOP 1 ID
-                    FROM Fintech_ProcessedFiles WITH (INDEX(IX_Fintech_ProcessedFiles_Path_FileName_ID), FORCESEEK)
-                    WHERE [Path] = @Path AND FileName = @FileName
+                    FROM Fintech_ProcessedFiles
+                    WHERE [Path] IN (@Path, @LegacyPath, @PreviousPath, @PreviousLegacyPath) AND FileName = @FileName
                     ORDER BY ID DESC;", con))
                 {
                     existingCmd.Parameters.Add("@Path", SqlDbType.VarChar, 1000).Value = directoryPath;
+                    existingCmd.Parameters.Add("@LegacyPath", SqlDbType.VarChar, 1000).Value = directoryPath.Replace('/', '\\');
+                    var previousDirectory = SftpLayout.PreviousInputDirectory(directoryPath);
+                    existingCmd.Parameters.Add("@PreviousPath", SqlDbType.VarChar, 1000).Value = previousDirectory;
+                    existingCmd.Parameters.Add("@PreviousLegacyPath", SqlDbType.VarChar, 1000).Value = previousDirectory.Replace('/', '\\');
                     existingCmd.Parameters.Add("@FileName", SqlDbType.VarChar, 255).Value = fileName;
 
                     object existingId = existingCmd.ExecuteScalar();
@@ -223,7 +241,7 @@ namespace CSVReader
 
         public List<int> getDeliveryIDs(int omniSiteID, int sDid, int eDid)
         {
-            SqlConnection con = new SqlConnection();
+            using SqlConnection con = new SqlConnection();
             SqlCommand cmd = new SqlCommand("Select delivery_id from Fintech_TankDelivery where Site_ID = @Omni_siteid and delivery_id >= @s_deliveryid and delivery_id <= @e_deliveryid", con);
             cmd.Parameters.AddWithValue("@Omni_siteid", omniSiteID);
             cmd.Parameters.AddWithValue("@s_deliveryid", sDid);
@@ -249,8 +267,8 @@ namespace CSVReader
 
         public List<int> getSaleIDs(int SiteID, int s_SaleID, int e_SaleID)
         {
-            SqlConnection con = new SqlConnection();
-            SqlCommand cmd = new SqlCommand("Select Sale_ID from Fintech_Transactions WITH (INDEX(nci_wi_Fintech_Transactions_81D3E1FE1BDB262759B06AB939706F65), FORCESEEK) where Site_ID = @Omni_siteid and sale_id >= @s_saleid and sale_id <= @e_saleid", con);
+            using SqlConnection con = new SqlConnection();
+            SqlCommand cmd = new SqlCommand("Select Sale_ID from Fintech_Transactions where Site_ID = @Omni_siteid and sale_id >= @s_saleid and sale_id <= @e_saleid", con);
             cmd.Parameters.AddWithValue("@Omni_siteid", SiteID);
             cmd.Parameters.AddWithValue("@s_saleid", s_SaleID);
             cmd.Parameters.AddWithValue("@e_saleid", e_SaleID);
@@ -280,7 +298,7 @@ namespace CSVReader
         {
             //List<int> tankIDs = map.getTanks(OmniSiteID);
 
-            SqlConnection con = new SqlConnection();
+            using SqlConnection con = new SqlConnection();
             SqlCommand cmd = new SqlCommand("Select tank_id from Fintech_TankLevels where Site_ID = @Omni_siteid and FC_TimeStamp = @timestamp", con);
             cmd.Parameters.AddWithValue("@Omni_siteid", OmniSiteID);
             cmd.Parameters.AddWithValue("@timestamp", timeStamp);
@@ -364,10 +382,11 @@ namespace CSVReader
                 }
                 catch (Exception e)
                 {
+                    if (e is SqlException) throw;
                     //logger.writelog(e.Message.ToString());
                     logger.Error("DB-AddDataToTransactions -" + e.Message, e);
                     Console.WriteLine(e);
-                    continue;
+                    throw;
                 }
 
                 //Combining the dates
@@ -471,6 +490,7 @@ namespace CSVReader
                 }
                 catch (Exception ex)
                 {
+                    if (ex is SqlException) throw;
                     logger.Error("insertBulkTransactions - " + ex.Message, ex);
                     FtpConnectivity.isExceptionOccured = true;
                     throw;
@@ -485,8 +505,8 @@ namespace CSVReader
 
             Console.WriteLine("get transactions sale ids\n");
 
-            SqlConnection con = new SqlConnection();
-            SqlCommand cmd = new SqlCommand("Select Sale_ID from Fintech_transactionsType WITH (INDEX(nci_wi_fintech_transactionstype_D98EF09E695E01D7135B7CCA5534594A), FORCESEEK) where Site_ID = @Omni_siteid and sale_id >= @s_saleid and sale_id <= @e_saleid", con);
+            using SqlConnection con = new SqlConnection();
+            SqlCommand cmd = new SqlCommand("Select Sale_ID from Fintech_transactionsType where Site_ID = @Omni_siteid and sale_id >= @s_saleid and sale_id <= @e_saleid", con);
             cmd.Parameters.AddWithValue("@Omni_siteid", SiteID);
             cmd.Parameters.AddWithValue("@s_saleid", s_SaleID);
             cmd.Parameters.AddWithValue("@e_saleid", e_SaleID);
@@ -606,6 +626,7 @@ namespace CSVReader
                     }
                     catch (Exception ex)
                     {
+                    if (ex is SqlException) throw;
                         logger.Error("AddDataToTransactionsType - " + ex.Message, ex);
                         FtpConnectivity.isExceptionOccured = true;
                         throw;
@@ -614,8 +635,9 @@ namespace CSVReader
             }
             catch (Exception ex)
             {
+                    if (ex is SqlException) throw;
                 logger.Error("AddDataToTransactionsType - " + ex.Message, ex);
-                //logger.writelog("Updating transactionstype failed");
+                throw;
             }
 
             /*
@@ -674,8 +696,9 @@ namespace CSVReader
                 }
                 catch (Exception ex)
                 {
+                    if (ex is SqlException) throw;
                     logger.Error("AddDataToTanks- " + ex.Message, ex);
-                    continue;
+                    throw;
                 }
                 //Check if record against tank is present then update else insert new to TankStatusLive Table
                 //insertUpdateTanksDataToTankStatusLiveTb(dataRow, OmniSiteId, FintechSiteId, FintechTankId, OmniAssetID);
@@ -737,6 +760,7 @@ namespace CSVReader
                 }
                 catch (Exception ex)
                 {
+                    if (ex is SqlException) throw;
                     logger.Error("insertBulkTankStatus- " + ex.Message, ex);
                     FtpConnectivity.isExceptionOccured = true;
                     throw;
@@ -773,8 +797,9 @@ namespace CSVReader
                 }
                 catch (Exception e)
                 {
+                    if (e is SqlException) throw;
                     logger.Error("AddDataToTDD - " + e.Message, e);
-                    continue;
+                    throw;
                 }
 
                 //Combining the dates;
@@ -815,6 +840,7 @@ namespace CSVReader
                     }
                     catch (Exception ex)
                     {
+                    if (ex is SqlException) throw;
                         logger.Error("AddDataToTDD - " + ex.Message, ex);
                         FtpConnectivity.isExceptionOccured = true;
                         throw;
@@ -844,7 +870,7 @@ namespace CSVReader
             using (var cmd = new SqlCommand(@"
             SELECT 
                 CONCAT(Site_ID, '|', Alarm_Type, '|', Location_Type, '|', Location_ID, '|', FORMAT(fc_alarmdatetime, 'yyyyMMddHHmmss')) AS AlarmKey
-            FROM Fintech_Alarms WITH (INDEX(IX_Fintech_Alarms_Site_FcDate), FORCESEEK)
+            FROM Fintech_Alarms
             WHERE Site_ID = @SiteId
               AND fc_alarmdatetime BETWEEN @MinDate AND @MaxDate;", con))
             {
@@ -1043,6 +1069,7 @@ namespace CSVReader
                     }
                     catch (Exception ex)
                     {
+                    if (ex is SqlException) throw;
                         logger.Error("AddAlarms - " + ex.Message, ex);
                         throw;
                     }
@@ -1050,6 +1077,7 @@ namespace CSVReader
             }
             catch (Exception ex)
             {
+                    if (ex is SqlException) throw;
                 logger.Error("AddDataToAlarms - " + ex.Message, ex);
                 FtpConnectivity.isExceptionOccured = true;
             }
@@ -1270,7 +1298,7 @@ namespace CSVReader
         {
             string sql_query = "update CountJSONS set JSONS_SENT += " + Convert.ToString(count) + " where Customer_id = " + Convert.ToString(CustomerID) + " and json_type = " + Convert.ToString(JSON_TYPE);
             Console.WriteLine(sql_query);
-            SqlConnection conn = new SqlConnection(connectToDb);
+            using SqlConnection conn = new SqlConnection(connectToDb);
             SqlCommand cmd;
             conn.Open();
             cmd = new SqlCommand(sql_query, conn);
@@ -1296,6 +1324,7 @@ namespace CSVReader
                 }
                 catch (Exception ex)
                 {
+                    if (ex is SqlException) throw;
                     logger.Error("callHourlyProcedureForRegeneratedFile- " + ex.Message, ex);
                     FtpConnectivity.isExceptionOccured = true;
                 }
@@ -1313,6 +1342,7 @@ namespace CSVReader
             }
             catch (Exception ex)
             {
+                    if (ex is SqlException) throw;
                 throw;
             }
         }
@@ -1326,6 +1356,7 @@ namespace CSVReader
             }
             catch (Exception ex)
             {
+                    if (ex is SqlException) throw;
                 throw;
             }
         }
@@ -1348,14 +1379,14 @@ namespace CSVReader
                 {
                     ibank = row["ibank"] != null ? Convert.ToInt32(row["ibank"]) : 0,
                     Tank = row["Tank"] != null ? Convert.ToInt32(row["Tank"]) : 0,
-                    QTY = row["QTY"] != null ? float.Parse(row["QTY"].ToString()) : 0.0F,
-                    Temperature = row["Temperature"] != null ? float.Parse(row["Temperature"].ToString()) : 0.0F,
-                    Water = row["Water"] != null ? float.Parse(row["Water"].ToString()) : 0.0F,
-                    Height = row["Height"] != null ? float.Parse(row["Height"].ToString()) : 0.0F,
+                    QTY = row["QTY"] != null ? float.Parse(row["QTY"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    Temperature = row["Temperature"] != null ? float.Parse(row["Temperature"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    Water = row["Water"] != null ? float.Parse(row["Water"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    Height = row["Height"] != null ? float.Parse(row["Height"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
                 };
 
                 if (row["DateTime"] != null)
-                    obj.DateTime = Convert.ToDateTime(row["DateTime"].ToString());
+                    obj.DateTime = DateTime.Parse(row["DateTime"].ToString(), CultureInfo.InvariantCulture);
 
                 obj.OmniSiteId = map.getOmniSiteID(obj.ibank);
                 obj.OmniAssetId_Tank = map.getOmniAssetID(obj.ibank, obj.Tank);
@@ -1369,23 +1400,7 @@ namespace CSVReader
             }
 
             list.RemoveAll(l => l.DateTime.Year == 1970);
-
-            Console.WriteLine($"Data structured, filtered & formatted => remaining records are: {list.Count()}");
-
-            builder.AppendLine(@"INSERT INTO Fintech_TankLevels(Site_ID, Tank_ID, Product_ID, Product_Number, Product_Volume, Product_Height, Water_Volume, Product_Temperature, Time_Stamp, CreatedBy, CreatedOn,FC_SiteID, Omni_AssetID, FC_TimeStamp, ProcessedFileID) VALUES");
-
-            Console.WriteLine("Preparing data insertion query");
-
-            foreach (var item in list)
-            {
-                builder.AppendLine($@"({item.OmniSiteId},{item.Tank},'{item.ProductId}',{item.ProductNumber},{item.QTY},{item.Height},{item.Water},{item.Temperature},'{item.DateTime.ToString(SQLDateTimeFormat)}','ETL',GETDATE(),{item.ibank},{item.OmniAssetId_Tank},'{item.DateTime.ToString(SQLDateTimeFormat)}',{(processedFileId.HasValue ? processedFileId.Value.ToString() : "NULL")}),");
-            }
-            string query = builder.ToString().Trim();
-            query = query.Remove(query.Length - 1);
-
-            int resp = ExecureSqlQuery(query);
-            Console.WriteLine($"DB insert process status: {resp > 0}, Total Records inserted: {resp}");
-            return;
+            WriteMagLinkRows(BuildMagLinkStockTable(list, processedFileId), "Fintech_TankLevels");
         }
 
 
@@ -1406,20 +1421,20 @@ namespace CSVReader
                 {
                     ibank = row["ibank"] != null ? Convert.ToInt32(row["ibank"]) : 0,
                     Tank = row["Tank"] != null ? Convert.ToInt32(row["Tank"]) : 0,
-                    StartVolume = row["StartVolume"] != null ? float.Parse(row["StartVolume"].ToString()) : 0.0F,
-                    StartWater = row["StartWater"] != null ? float.Parse(row["StartWater"].ToString()) : 0.0F,
-                    StartTemperature = row["StartTemperature"] != null ? float.Parse(row["StartTemperature"].ToString()) : 0.0F,
-                    EndVolume = row["EndVolume"] != null ? float.Parse(row["EndVolume"].ToString()) : 0.0F,
-                    EndWater = row["EndWater"] != null ? float.Parse(row["EndWater"].ToString()) : 0.0F,
-                    EndTemperature = row["EndTemperature"] != null ? float.Parse(row["EndTemperature"].ToString()) : 0.0F,
-                    Quantity = row["Quantity"] != null ? float.Parse(row["Quantity"].ToString()) : 0.0F,
-                    ConfirmedQuantity = !string.IsNullOrWhiteSpace(row["ConfirmedQuantity"].ToString()) ? float.Parse(row["ConfirmedQuantity"].ToString()) : 0.0F
+                    StartVolume = row["StartVolume"] != null ? float.Parse(row["StartVolume"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    StartWater = row["StartWater"] != null ? float.Parse(row["StartWater"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    StartTemperature = row["StartTemperature"] != null ? float.Parse(row["StartTemperature"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    EndVolume = row["EndVolume"] != null ? float.Parse(row["EndVolume"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    EndWater = row["EndWater"] != null ? float.Parse(row["EndWater"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    EndTemperature = row["EndTemperature"] != null ? float.Parse(row["EndTemperature"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    Quantity = row["Quantity"] != null ? float.Parse(row["Quantity"].ToString(), CultureInfo.InvariantCulture) : 0.0F,
+                    ConfirmedQuantity = !string.IsNullOrWhiteSpace(row["ConfirmedQuantity"].ToString()) ? float.Parse(row["ConfirmedQuantity"].ToString(), CultureInfo.InvariantCulture) : 0.0F
                 };
 
                 if (row["StartDateTime"] != null)
-                    obj.StartDateTime = Convert.ToDateTime(row["StartDateTime"].ToString());
+                    obj.StartDateTime = DateTime.Parse(row["StartDateTime"].ToString(), CultureInfo.InvariantCulture);
                 if (row["EndDateTime"] != null)
-                    obj.EndDateTime = Convert.ToDateTime(row["EndDateTime"].ToString());
+                    obj.EndDateTime = DateTime.Parse(row["EndDateTime"].ToString(), CultureInfo.InvariantCulture);
 
                 obj.OmniSiteId = map.getOmniSiteID(obj.ibank);
                 obj.OmniAssetId_Tank = map.getOmniAssetID(obj.ibank, obj.Tank);
@@ -1433,23 +1448,56 @@ namespace CSVReader
             }
 
             list.RemoveAll(l => l.StartDateTime.Year == 1970 || l.EndDateTime.Year == 1970);
+            WriteMagLinkRows(BuildMagLinkDeliveryTable(list, processedFileId), "Fintech_TankDelivery");
+        }
 
-            Console.WriteLine($"Data structured, filtered & formatted => remaining records are: {list.Count()}");
+        internal static DataTable BuildMagLinkStockTable(IEnumerable<FintechTankLevelsForMagLinkModel> items, int? fileId)
+        {
+            var table = MagLinkTable(
+                ("Site_ID", typeof(int)), ("Tank_ID", typeof(int)), ("Product_ID", typeof(string)), ("Product_Number", typeof(int)),
+                ("Product_Volume", typeof(float)), ("Product_Height", typeof(float)), ("Water_Volume", typeof(float)), ("Product_Temperature", typeof(float)),
+                ("Time_Stamp", typeof(DateTime)), ("CreatedBy", typeof(string)), ("CreatedOn", typeof(DateTime)), ("FC_SiteID", typeof(int)),
+                ("Omni_AssetID", typeof(int)), ("FC_TimeStamp", typeof(DateTime)), ("ProcessedFileID", typeof(int)));
+            foreach (var item in items)
+                table.Rows.Add(item.OmniSiteId, item.Tank, item.ProductId, item.ProductNumber, item.QTY, item.Height, item.Water,
+                    item.Temperature, item.DateTime, "ETL", DateTime.UtcNow, item.ibank, item.OmniAssetId_Tank, item.DateTime, (object)fileId ?? DBNull.Value);
+            return table;
+        }
 
-            builder.AppendLine(@"INSERT INTO Fintech_TankDelivery(site_id,tank_id,date_start,time_start,vol_total,date_end,time_end,vol_start,vol_end,temp_start,temp_end,water_start,water_end,FC_SiteID,Omni_AssetID,Product_ID,Grade,Confirmed_Quantity,ProcessedFileID) VALUES");
+        internal static DataTable BuildMagLinkDeliveryTable(IEnumerable<FintechTankDeliveryForMagLinkModel> items, int? fileId)
+        {
+            var table = MagLinkTable(
+                ("site_id", typeof(int)), ("tank_id", typeof(int)), ("date_start", typeof(DateTime)), ("time_start", typeof(TimeSpan)),
+                ("vol_total", typeof(float)), ("date_end", typeof(DateTime)), ("time_end", typeof(TimeSpan)), ("vol_start", typeof(float)),
+                ("vol_end", typeof(float)), ("temp_start", typeof(float)), ("temp_end", typeof(float)), ("water_start", typeof(float)),
+                ("water_end", typeof(float)), ("FC_SiteID", typeof(int)), ("Omni_AssetID", typeof(int)), ("Product_ID", typeof(int)),
+                ("Grade", typeof(string)), ("Confirmed_Quantity", typeof(float)), ("ProcessedFileID", typeof(int)));
+            foreach (var item in items)
+                table.Rows.Add(item.OmniSiteId, item.Tank, item.StartDateTime.Date, item.StartDateTime.TimeOfDay, item.Quantity,
+                    item.EndDateTime.Date, item.EndDateTime.TimeOfDay, item.StartVolume, item.EndVolume, item.StartTemperature, item.EndTemperature,
+                    item.StartWater, item.EndWater, item.ibank, item.OmniAssetId_Tank, item.ProductNumber, item.ProductId, item.ConfirmedQuantity, (object)fileId ?? DBNull.Value);
+            return table;
+        }
 
-            Console.WriteLine("Preparing data insertion query");
+        private static DataTable MagLinkTable(params (string Name, Type Type)[] columns)
+        {
+            var table = new DataTable { Locale = CultureInfo.InvariantCulture };
+            foreach (var column in columns) table.Columns.Add(column.Name, column.Type);
+            return table;
+        }
 
-            foreach (var item in list)
-            {
-                builder.AppendLine($@"({item.OmniSiteId},{item.Tank},'{item.StartDateTime.ToString(SQLDateFormat)}','{item.StartDateTime.ToString(SQLTimeFormat)}',{item.Quantity},'{item.EndDateTime.ToString(SQLDateFormat)}','{item.EndDateTime.ToString(SQLTimeFormat)}',{item.StartVolume},{item.EndVolume},{item.StartTemperature},'{item.EndTemperature}',{item.StartWater},{item.EndWater},{item.ibank},{item.OmniAssetId_Tank},{item.ProductNumber},'{item.ProductId}',{item.ConfirmedQuantity},{(processedFileId.HasValue ? processedFileId.Value.ToString() : "NULL")}),");
-            }
-            string query = builder.ToString().Trim();
-            query = query.Remove(query.Length - 1);
-
-            int resp = ExecureSqlQuery(query);
-            Console.WriteLine($"DB insert process status: {resp > 0}, Total Records inserted: {resp}");
-            return;
+        private void WriteMagLinkRows(DataTable rows, string table)
+        {
+            if (rows.Rows.Count == 0) return; // All epoch-1970 rows may have been filtered out.
+            using var connection = new SqlConnection(connectToDb);
+            connection.Open();
+            using var transaction = System.Transactions.Transaction.Current == null ? connection.BeginTransaction() : null;
+            using var copy = new SqlBulkCopy(connection, SqlBulkCopyOptions.CheckConstraints | SqlBulkCopyOptions.FireTriggers, transaction)
+            { DestinationTableName = table, BatchSize = 1000, BulkCopyTimeout = 180 };
+            foreach (DataColumn column in rows.Columns) copy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+            copy.WriteToServer(rows);
+            transaction?.Commit();
+            logger.Info($"MagLink: inserted {rows.Rows.Count} rows in {table}.");
         }
 
         public int ExecureSqlQuery(string sqlQuery)
@@ -1491,6 +1539,7 @@ namespace CSVReader
             }
             catch (Exception ex)
             {
+                    if (ex is SqlException) throw;
                 Console.WriteLine(ex.Message);
                 logger.Error("ExecureSqlQuery failed: " + ex.Message, ex);
                 FtpConnectivity.isExceptionOccured = true;

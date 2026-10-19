@@ -7,6 +7,8 @@
     <Nullable>disable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+    <InternalsVisibleTo Include="FintechEtl.RegressionTests" />
     <None Update="local.settings.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <None Update="azure-app-settings.local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.50.0" />

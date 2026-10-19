@@ -1,59 +1,114 @@
 # Fintech ETL Azure Function
 
-## Deploy from VS Code
+The .NET 10 isolated timer scans Azure SFTP every three minutes. Numeric site IDs of any length are supported when they fit a positive SQL INT. Sites are discovered only under `/Unprocessed`; archives are read from `/Unprocessed/<site ID>/input` and processed sequentially per site, with four site workers by default. `/Unprocessed/<site ID>/output` is a sibling folder reserved for outgoing files and is not scanned by ETL.
 
-Open `C:\Users\usmtariq\Desktop\fintech_etl_funcapp` as the VS Code folder. In the Azure Functions extension, choose **Deploy to Function App** and select this folder. The `.vscode` settings run the `publish (functions)` task with the local .NET 10 SDK, then deploy `bin/Release/net10.0/publish`. The project source folder is the folder to select; do not select `publish`, `bin`, or the old ZIP file. The publish output contains `host.json` and function metadata at its root. Private local settings, the Azure app settings export, and backlog logs are excluded.
+The October 19, 2026 comparison found missing TGZ, price-response, CON, MagLink, deterministic CSV ordering and partial-success behavior. These are now implemented. See [PARITY.md](PARITY.md) for the comparison, intentional deployment differences and verification limits.
 
-Set the Azure Function App application settings separately using the private `azure-app-settings.local.json` file. Do not upload `local.settings.json` from VS Code: it has an empty local host storage setting and `EtlDryRun=true`. The Azure app must use its configured `AzureWebJobsStorage` and `EtlDryRun=false` for live processing. The timer starts scanning existing input ZIPs after deployment.
+## Inputs and routing
 
-This .NET 10 isolated Azure Function runs every three minutes (`0 */3 * * * *`, UTC). It signs into the Azure Blob SFTP account as `fintechsftpdata.sftpadmin`, lists numeric site directories under `/` regardless of digit count, and reads complete ZIP files in `/<site ID>/input`. Site IDs must fit the database's positive SQL `INT` mapping. It uses the existing Fintech ETL mapping, CSV reader and DAL code to write SQL rows. The archive destinations at the SFTP container root are:
+ZIP, TGZ and TAR.GZ share one processing pipeline. CSV processing order matches the main ETL: RESFPR → PCA → PCD → GRP → PCH → PSL → TIN → TDD → PPD → TAS → other CSVs. Unknown CSVs are preserved, as in the main repo. CON CSVs are forwarded to their configured destinations, including for unconfigured sites.
 
-- Valid, configured ZIP: `/ProcessedFile/<site ID>/<original name>`.
-- Regenerated ZIP: copied to `/RegeneratedFile/<site ID>/`, then moved to `/ProcessedFile/<site ID>/` after the hourly regeneration procedure succeeds.
-- Site absent from the active mapping: `/notconfigured/<site ID>/<original name>` without processing its CSVs.
-- ETL processing or data error: `/ExceptionFile/<site ID>/<original name>`, with the failure logged and its database status set to `Failed` when a record exists.
-- Invalid ZIP name: `/invalidFile/<site ID>/<original name>`. A valid name begins with the full numeric site folder ID, has content after that ID, and ends in `.zip`. The original ETL assumed the first six filename characters were the site ID but did not have an `invalidFile` route or require a timestamp for ordinary ZIPs. The Function supports numeric IDs of other lengths as requested. Regenerated ZIPs still need a valid 14-digit `yyyyMMddHHmmss` timestamp after the ID.
+Destinations at the SFTP container root:
 
-An existing destination name goes under that site's `duplicate` subfolder with a unique suffix. SFTP failures, directly thrown SQL exceptions, and failed archive moves leave the ZIP in input for retry. The original regenerated stored procedure wrapper catches its SQL errors and marks them as ETL failures, so those ZIPs go to `ExceptionFile`. A ZIP already marked `Processed` in `Fintech_ProcessedFiles` is archived without inserting rows again after a prior move failure.
+| Result | Destination |
+| --- | --- |
+| Successful archive | `/Processed/<site ID>/<original name>` |
+| Successful regenerated archive | Copy to `/RegeneratedFile/<site ID>/`, then move to `/Processed/<site ID>/` |
+| Some CSVs failed | Filtered successful CSV archive in `/Processed/<site ID>/`; filtered failed CSV archive in `/ExceptionFile/<site ID>/` |
+| All CSVs failed or archive is corrupt | `/ExceptionFile/<site ID>/<original name>` |
+| Inactive/unmapped site | `/notconfigured/<site ID>/<original name>` after CON forwarding |
+| Filename does not begin with its site folder ID | `/invalidFile/<site ID>/<original name>` |
+| MagLink success / inactive site / data error | `/MagLinkProcessed/<site ID>/`, `/MagLinkNotConfigured/<site ID>/`, `/MagLinkException/<site ID>/` |
 
-The Function reuses the original mapping, CSV readers, DAL inserts, and `Fintech_Regenerated_Files` stored procedure call. Its surrounding behavior is intentionally different: it accepts numeric site folders of any length, handles ZIPs rather than the original ZIP/TGZ/MagLink sources, validates ZIPs and PSL product mappings before insertion, processes sites in parallel, and adds `invalidFile` routing. Regenerated ZIP routing now follows the original ETL: copy to `RegeneratedFile`, then move to `ProcessedFile`.
+Partial-result archives retain their original extension and nested CSV paths. Input is deleted only after both filtered archives are published. An existing archive destination is preserved; subsequent versions go under `duplicate`. SQL, local I/O, CON delivery and SFTP failures leave input for retry. Regenerated files require a 14-digit `yyyyMMddHHmmss` timestamp immediately after the site ID; hourly recalculation uses the mapped Omni site and timestamp ±1 hour. The timestamp is validated before inserting rows.
 
-The 2026-09-29 local routing test confirmed `ProcessedFile`, `ExceptionFile`, `invalidFile`, and `notconfigured` moves. A regenerated sample reached the original `Fintech_Regenerated_Files` procedure but timed out at both 30 and 180 seconds, so successful `RegeneratedFile` routing remains unverified. The original 30-second command timeout and error behavior were restored after the test.
+The requested container layout is:
 
-The timer uses `EtlWorkerCount` parallel site workers, defaulting to `4`. It creates at most four long-lived workers per invocation; each worker reuses its own SFTP connection and ETL mapping as it moves between sites. Files within one site are processed in filename order. The `host.json` timeout is one day (`1.00:00:00`); an active run stops accepting new files after 23.5 hours to leave cleanup time. Runs usually finish much earlier. A timer invocation does not start another independent copy for each site, so `FUNCTIONS_WORKER_PROCESS_COUNT` does not control this ETL's site concurrency.
+```text
+sftp-data/
+  Unprocessed/
+    <site ID>/
+      input/
+      output/
+  Processed/<site ID>/<original archive>
+  ExceptionFile/<site ID>/<original archive>
+  invalidFile/<site ID>/<original archive>
+  notconfigured/<site ID>/<original archive>
+  RegeneratedFile/<site ID>/<original archive>
+```
+
+On October 19, 2026, the user requested a reset of existing `sftp-data` folders while preserving site `111111`. That site was moved intact to `/Unprocessed/111111`; its existing empty `input` and `output` directories were verified before and after the move. The other 1,005 old top-level directories and their contents were removed, then the empty root archive folders above were created. `con-files` was outside the cleanup scope and was not changed. Live runs ensure `input` and `output` exist for discovered sites; dry runs do not create folders.
 
 ## Configuration
 
-Configure Function App application settings from [local.settings.example.json](local.settings.example.json). `SftpPassword` is the admin password from the simulator's `config.toml`; it is present only in the ignored local `local.settings.json`. `SftpHostKeySha256` contains the verified host key fingerprint(s), separated by semicolons. `AzureWebJobsStorage` is the Function host's own storage connection string. The SFTP container is reached through the admin user's home directory, so paths begin with `/<site ID>`.
+Start with [local.settings.example.json](local.settings.example.json). Private `local.settings.json` and `azure-app-settings.local.json` are ignored and excluded from publication. Production settings belong in the deployed Function App's application settings/environment variables, or managed secret references. Do not upload the private local settings file.
 
-For the Azure App Service plan, select the **.NET 10 isolated** runtime and enable **Always On**. Set `FUNCTIONS_WORKER_RUNTIME=dotnet-isolated`, `FUNCTIONS_EXTENSION_VERSION=~4`, `AzureWebJobsStorage`, the SFTP settings, `FintechSqlConnectionString`, `EtlDryRun=false`, and `EtlWorkerCount=4` in application settings. Increase `EtlWorkerCount` only after measuring SQL and SFTP capacity. A 24-hour timeout is an upper bound, not a guarantee against platform restarts.
+| Setting | Purpose |
+| --- | --- |
+| `AzureWebJobsStorage` | Function host storage; required by the timer host |
+| `FUNCTIONS_WORKER_RUNTIME` | `dotnet-isolated` |
+| `SftpHost`, `SftpPort`, `SftpUsername`, `SftpPassword` | SFTP connection; port defaults to 22 |
+| `SftpHostKeySha256` | Verified SHA256 host fingerprint; separate multiple fingerprints with `;` |
+| `FintechSqlConnectionString` | Target database; current safety guard requires `Initial Catalog=FintechStagDB` |
+| `EtlDryRun` | `true` lists eligible files without downloading, SQL processing or remote writes; `false` enables processing |
+| `EtlWorkerCount` | Concurrent site workers, 1–32; default 4 |
+| `EtlMinimumFileAgeSeconds` | Minimum input age; default 60 seconds |
+| `ConSftpUsername` | Container-qualified CON login: `fintechsftpdata.con-files.sftpadmin`; uses the existing SFTP host/password/fingerprint |
+| `ConSftpDestinations` | Absolute directories within the CON connection's container, separated by `;`; configured as `/Unprocessed` |
+| `MagLinkSftpRoot` | Optional absolute SFTP root containing `<site ID>/stockLevels*.csv` and `<site ID>/deliveries*.csv`; empty disables discovery |
 
-`FintechSqlConnectionString` **must** have `Initial Catalog=FintechStressTesting`. Startup validation rejects another catalog or an empty live connection string before any ZIP is processed. The private local setting now points to that database. Set `EtlDryRun=false` to enable processing after verifying its schema and site mappings. The SQL database needs the mapping tables, ETL tables, table types and stored procedures used by the copied DAL.
+### CON container and folders
 
-The original `App.config` was not copied: it has VM paths and enables writes to production and staging databases. The Function uses Azure application settings. Dual database insert is disabled in the copied DAL.
+The selected container is `con-files` in `fintechsftpdata`. Its root has exactly the existing CON consumer's folder names: `ConfigurationUpdate`, `Discarded`, `Exception`, `Processed`, `Unprocessed`. These directories were created and verified through the Azure directory API on October 19, 2026.
 
-## Local checks
+Set these Azure Function App **Settings → Environment variables / Application settings**, already saved in the ignored local Azure settings export:
 
-```powershell
-& 'C:\Users\usmtariq\.dotnet10\dotnet.exe' build
-& 'C:\Users\usmtariq\.dotnet10\dotnet.exe' run --no-build -- --scan-once --site-min 600000 --site-max 600010 --max-files 8
-& 'C:\Users\usmtariq\.dotnet10\dotnet.exe' run --no-build -- --verify-sql
+```text
+ConSftpUsername=fintechsftpdata.con-files.sftpadmin
+ConSftpDestinations=/Unprocessed
 ```
 
-The scan command needs `EtlDryRun=true` and performs a read-only SFTP scan. The private local settings currently keep dry run enabled. To run the timer locally, install Azure Functions Core Tools, set `AzureWebJobsStorage`, change `EtlDryRun` to `false`, and run `func start`. Use the Function App's .NET 10 isolated runtime for deployment.
+The function opens a separate connection for this container, while the input connection keeps its `sftp-data` home. The path is `/Unprocessed`, without a `/con-files` prefix. Incoming files land directly there; duplicates are preserved in `/Unprocessed/duplicate` with numbered suffixes. Files upload to a temporary name before rename. The other four directories belong to the downstream CON workflow; the ETL does not mark a delivered CON as processed before that consumer handles it. Container-qualified connection details follow [Microsoft's SFTP connection documentation](https://learn.microsoft.com/en-us/azure/storage/blobs/secure-file-transfer-protocol-support-connect).
 
-The extracted ZIP is capped at 1,000 entries and 250 MB total unpacked size. The Function processes sites in parallel and ZIPs for each site sequentially. The existing DAL handles each CSV write independently; if a later CSV fails, earlier SQL rows may already have been written. Review the stress database's duplicate handling before replaying such a ZIP.
+The function ensures these directories on the first CON delivery per worker. `--prepare-con` can prepare them separately without ETL processing or SQL writes. On October 19, 2026, `sftpadmin` was granted Read, Write, List, Create and Delete permissions (`rwlcd`) for `con-files` after MFA sign-in. The existing `sftp-data` permissions (`rwdlcop`) and home directory (`sftp-data`) were verified unchanged. SFTP was then enabled on the storage account at the user's request. Read-only SFTP logins succeeded for both containers, including verification of all five CON directories.
 
-## Live test findings
+For local testing, the same settings are under `Values` in private `local.settings.json`; its dry run remains enabled. If destinations are cleared, an archive containing a CON CSV stays in input for retry. Setting destinations without an explicit CON username is rejected to prevent delivery into the input container. Set `MagLinkSftpRoot` separately when that source path is known.
 
-The local one-shot command uses the same method as the timer:
+## Recovery and data integrity
+
+SQL writes for one CSV and its successful checkpoint share a three-minute ambient SQL transaction. A data error rolls back that CSV; independent successful CSVs commit and form the processed portion. Price-response changes and MagLink bulk inserts use the same transaction boundary. MagLink uses typed bulk rows instead of interpolated SQL, supports more than 1,000 rows, and preserves the legacy epoch-1970 filter. Its parsing uses invariant culture.
+
+The existing `Fintech_ProcessedFiles` table stores parent archive records, child CSV checkpoints (`<archive remote path>!/<relative CSV path>`), and an hourly-regeneration checkpoint. Data rows retain the parent archive's `ProcessedFileID`. Successful child checkpoints prevent repeating SQL writes after a platform restart or publication failure. Parent statuses include `Processed`, `Partial`, `Failed`, and `Retry`. Replaying a repaired file that already has a terminal record needs an explicit operator recovery decision; filenames must be immutable for each delivery. A new delivery must have a unique name.
+
+SQL paths are canonical forward-slash paths; lookups also accept the old Windows-backslash form. Checkpoints under `/Unprocessed/<site>/input` also look up their previous `/<site>/input` identity, including child CSV checkpoints, so relocating a site does not itself repeat already committed SQL work. No SQL tracking records were deleted in the container cleanup. SQL queries no longer force stress-database-specific index names. Appropriate indexes still matter for throughput, including the alarm index in [sql/001_alarm_lookup_index.sql](sql/001_alarm_lookup_index.sql).
+
+Live runs validate required schema objects and sequential connection enlistment first. SQL connection pooling and transaction enlistment must stay enabled. Session-owned SQL site locks prevent two instances of this version from processing the same site concurrently. Stop old ETL/backlog processes before cutover; they do not participate in these locks. Mapping caches refresh every 15 minutes.
+
+Archive extraction rejects traversal, duplicate paths, links and special files. Limits: 1,000 entries, 100 MB per entry, 250 MB total extracted data and 250 MB compressed input. Input must remain unchanged during download. Producers should upload under a temporary name and atomically rename to the final name. Outputs also use temporary uploads and rename. Archive and CON publication is at least once: a crash after delivery can preserve an extra duplicate copy, while CSV SQL checkpoints prevent duplicate committed inserts. Downstream CON consumers must tolerate redelivery.
+
+## Build and checks
+
+Use the installed .NET 10 SDK. From this repository:
 
 ```powershell
-& 'C:\Users\usmtariq\.dotnet10\dotnet.exe' run --no-build -- --process-once
+$dotnet = 'C:\Users\usmtariq\.dotnet10\dotnet.exe'
+& $dotnet build --nologo
+& $dotnet run --project tests\FintechEtl.RegressionTests.csproj
+& $dotnet bin\Debug\net10.0\FintechEtl.FunctionApp.dll --verify-sql
+& $dotnet bin\Debug\net10.0\FintechEtl.FunctionApp.dll --scan-once --site 600005 --max-files 3
+& $dotnet bin\Debug\net10.0\FintechEtl.FunctionApp.dll --prepare-con
 ```
 
-`--site 600005 --max-files 1` narrows a local run to one ZIP; `--site-min` and `--site-max` select a local site range. The first live attempt exposed missing product mappings for customer `252`; these were added to `FintechStressTesting`, and the retried ZIP processed successfully. The Function rejects a ZIP with an unmapped PSL grade before inserting any CSV group or moving the ZIP. Existing partial rows from the first attempt remained associated with its failed `Fintech_ProcessedFiles` record; the legacy duplicate checks prevented re-inserting its PPD sale IDs on retry.
+`--verify-sql` checks 14 tables, six stored procedures, tracking columns, transaction connection reuse and mapping load without committed data writes. `--scan-once` requires `EtlDryRun=true` and performs read-only discovery. The offline regression suite does not connect to SQL or SFTP.
 
-The stress database's alarm lookup had no site/time index. [sql/001_alarm_lookup_index.sql](sql/001_alarm_lookup_index.sql) was applied to `FintechStressTesting` and is needed if that database is rebuilt. Its sample alarm lookup now completes in under one second.
+`--process-once` performs live writes using the timer's method and explicitly enables live processing. Optional local filters: `--site`, `--site-min`, `--site-max`, `--max-files`. Those filters apply only to local one-shot execution. Running the worker DLL directly avoids the Core Tools launch used by `dotnet run` for the function project.
 
-A read-only inventory initially found 22,481 ZIPs across 1,002 site input folders. Site `111222` has no input folder. The non-simulator site `111111` has two ZIPs and product rows, but its `FintechMappedCustomers` record is inactive; the ETL rejects it as unconfigured. The simulator ZIP for site `600005` processed successfully after the product mapping was added. Eight separate .NET 8 local processes are draining the simulator backlog while this .NET 10 build is prepared; their logs are under the ignored `backlog-runs` directory.
+## Deploy and production sign-off
+
+Open this repository folder in VS Code and deploy its publish output using the existing `.vscode` tasks. Alternatively run `dotnet publish -c Release` and deploy `bin/Release/net10.0/publish` with `host.json` and function metadata at the root. The Function host needs its own storage configuration, .NET 10 isolated runtime and Always On for the existing App Service plan. The configured timeout is one day; new file work stops after 23.5 hours, and host cancellation is observed between files. Database transactions may roll back on host termination; checkpoints support restart recovery.
+
+Current verification: 37 offline regression scenarios passed, including the new site hierarchy, `/Processed` routing and legacy checkpoint compatibility. Read-only checks on `FintechStagDB` passed for schema, transaction enlistment and mapping load. Simulator site `600005` has no active mapping in this database and would route to `notconfigured`; no site mappings were changed. The CON directories were created and verified in Azure. Both ignored private settings files select `FintechStagDB`, the separate CON login and `/Unprocessed` within `con-files`. Local dry run remains enabled. Build/publish validation is recorded in [PARITY.md](PARITY.md).
+
+The initial CON SFTP preparation attempt failed because Azure returned **SSH/SFTP are not enabled for this account**. The separate CON permission grant succeeded after MFA sign-in. Subsequently, the user requested SFTP enablement; Azure confirmed `isSftpEnabled=true`, and both container connections passed read-only directory checks. No ETL run, deployment or database schema changes were initiated as part of these checks. The currently deployed Azure application settings were not changed; deploy the build and apply the updated private settings export when ready.
+
+Production sign-off still requires a controlled end-to-end test of uploads/routing/regeneration, the MagLink source path if needed, and normal capacity/alert verification. The database guard now targets the requested staging database; secondary-database writes remain disabled.

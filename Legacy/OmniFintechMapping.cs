@@ -56,6 +56,8 @@ namespace CSVReader
 								WHERE IsActive=1 and SiteId is not null", conn); //check if customer is active and site is active as well
 
             conn.Open();
+            try
+            {
             da = new SqlDataAdapter(cmd);
             da.Fill(omniSiteID);
 
@@ -101,6 +103,8 @@ namespace CSVReader
             cmd = new SqlCommand("select * from Omni_Fintech_PumpMapping", conn);
             da = new SqlDataAdapter(cmd);
             da.Fill(Pumps);
+            }
+            finally { conn.Dispose(); }
         }
 
 

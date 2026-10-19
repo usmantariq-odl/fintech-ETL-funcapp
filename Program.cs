@@ -14,6 +14,16 @@ hierarchy.Root.AddAppender(new ConsoleAppender { Layout = new PatternLayout("%da
 hierarchy.Root.Level = log4net.Core.Level.Info;
 hierarchy.Configured = true;
 
+if (args.Contains("--prepare-con"))
+{
+    using var json = JsonDocument.Parse(File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json")));
+    foreach (var value in json.RootElement.GetProperty("Values").EnumerateObject())
+        Environment.SetEnvironmentVariable(value.Name, value.Value.GetString());
+    // Provision directories only; never processes archives or writes SQL data.
+    EtlTimer.PrepareConFolders(EtlSettings.Load());
+    return;
+}
+
 if (args.Contains("--verify-sql"))
 {
     var local = Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json");
@@ -21,16 +31,7 @@ if (args.Contains("--verify-sql"))
     foreach (var value in json.RootElement.GetProperty("Values").EnumerateObject())
         Environment.SetEnvironmentVariable(value.Name, value.Value.GetString());
     var settings = EtlSettings.Load();
-    using var connection = new SqlConnection(settings.SqlConnectionString);
-    connection.Open();
-    using var command = new SqlCommand(@"SELECT DB_NAME(),
-        (SELECT COUNT(*) FROM sys.tables WHERE name IN ('Fintech_ProcessedFiles','Fintech_Transactions','Fintech_TankLevels','Fintech_TankDelivery','FintechMappedCustomers','Omni_Fintech_SiteMapping','Omni_Fintech_TankMapping','Plant_Site','Omni_Fintech_Products')),
-        (SELECT COUNT(*) FROM sys.procedures WHERE name IN ('InsertintoFintechTransactions','InsertintoFintechTransactionsType','InsertintoFintechTankLevels','InsertintoFintechTanksDelivery','InsertintoFintechAlarms','Fintech_Regenerated_Files')),
-        (SELECT COUNT(*) FROM Omni_Fintech_SiteMapping WHERE FC_SiteID BETWEEN 600000 AND 600050)", connection);
-    using var result = command.ExecuteReader();
-    result.Read();
-    Console.WriteLine($"SQL database: {result.GetString(0)}; required tables: {result.GetInt32(1)}/9; stored procedures: {result.GetInt32(2)}/6; simulator site mappings: {result.GetInt32(3)}");
-    result.Close();
+    SqlSchemaVerifier.Verify(settings.SqlConnectionString);
     var mapping = new OmniFintechMapping(LogManager.GetLogger(typeof(OmniFintechMapping)));
     Console.WriteLine($"Existing ETL mapping loaded; FC site 600005 maps to Omni site {mapping.getOmniSiteID(600005)}.");
     return;
@@ -40,8 +41,8 @@ if (args.Contains("--verify-sql"))
 if (args.Contains("--scan-once") || args.Contains("--process-once"))
 {
     var processOnce = args.Contains("--process-once");
-    var local = Path.Combine(AppContext.BaseDirectory, "local.settings.json");
-    if (!File.Exists(local)) local = Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json");
+    var local = Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json");
+    if (!File.Exists(local)) local = Path.Combine(AppContext.BaseDirectory, "local.settings.json");
     using var json = JsonDocument.Parse(File.ReadAllText(local));
     foreach (var value in json.RootElement.GetProperty("Values").EnumerateObject())
         Environment.SetEnvironmentVariable(value.Name, value.Value.GetString());

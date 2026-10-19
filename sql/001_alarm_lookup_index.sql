@@ -1,6 +1,6 @@
--- Run only against FintechStressTesting. Covers the legacy alarm duplicate lookup.
-IF DB_NAME() <> N'FintechStressTesting'
-    THROW 50001, 'Wrong database for ETL test index', 1;
+-- Run only against FintechStagDB. Covers the legacy alarm duplicate lookup.
+IF DB_NAME() <> N'FintechStagDB'
+    THROW 50001, 'Wrong database for ETL staging index', 1;
 
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes
