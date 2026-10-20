@@ -3,8 +3,12 @@
 bin/
 obj/
 publish/
-backlog-runs/
+artifacts/
+scripts/
+tests/
+local.settings*.json
+azure-app-settings*.json
+appsettings*.json
+README.md
+SOURCE-PARITY.json
 *.log
-*.zip
-local.settings.json
-azure-app-settings.local.json

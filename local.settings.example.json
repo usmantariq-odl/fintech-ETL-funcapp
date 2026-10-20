@@ -1,22 +1,24 @@
 {
-  "IsEncrypted": false,
   "Values": {
-    "AzureWebJobsStorage": "",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    "WEBSITE_RUN_FROM_PACKAGE": "1",
     "SftpHost": "fintechsftpdata.blob.core.windows.net",
     "SftpPort": "22",
-    "SftpUsername": "fintechsftpdata.sftpadmin",
-    "SftpPassword": "REPLACE_WITH_SECRET",
-    "SftpHostKeySha256": "SHA256:REPLACE_WITH_VERIFIED_FINGERPRINT",
-    "FintechSqlConnectionString": "Server=YOUR_SERVER;Initial Catalog=FintechStagDB;User ID=YOUR_USER;Password=YOUR_PASSWORD;Encrypt=True;",
-    "EtlDryRun": "true",
-    "EtlWorkerCount": "4",
-    "EtlMinimumFileAgeSeconds": "60",
     "ConSftpUsername": "fintechsftpdata.con-files.sftpadmin",
-    "ConSftpDestinations": "/Unprocessed",
-    "MagLinkSftpRoot": "",
-    "SftpProvisioningSubscriptionId": "43e8904e-4836-4504-8c18-3e88d5fa6b78",
-    "SftpProvisioningResourceGroup": "RG-fintech-prod-sea",
-    "SftpProvisioningStorageAccount": "fintechsftpdata"
-  }
+    "SftpPassword": "REPLACE_WITH_SFTP_PASSWORD",
+    "SftpHostKeySha256": "SHA256:REPLACE_WITH_VERIFIED_HOST_FINGERPRINT",
+    "ApplicationSettings__AzureSql": "REPLACE_WITH_SQL_CONNECTION_STRING_OR_KEY_VAULT_REFERENCE",
+    "ApplicationSettings__UnprocessedFolder": "/Unprocessed",
+    "ApplicationSettings__ProcessedFolder": "/Processed",
+    "ApplicationSettings__ExceptionFolder": "/Exception",
+    "ApplicationSettings__DuplicateFolder": "/Duplicate",
+    "ApplicationSettings__ConfigurationUpdateFolder": "/ConfigurationUpdate",
+    "ApplicationSettings__DiscardedFolder": "/Discarded",
+    "ApplicationSettings__EmailRecipients": "YOUR_NOTIFICATION_RECIPIENTS",
+    "AutoSiteEmailConnectionString": "REPLACE_WITH_EMAIL_CONNECTION_STRING_OR_KEY_VAULT_REFERENCE",
+    "AutoSiteEmailSender": "alerts@octopusdtl.com"
+  },
+  "IsEncrypted": false
 }

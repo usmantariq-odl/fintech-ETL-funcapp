@@ -1,0 +1,110 @@
+{
+  "sourceRepository": "https://github.com/avanconltd/FintechAutoSiteConfiguration.git",
+  "sourceCommit": "fe0c7e7555b6b2ec85ad3d860931e0f620a2c1ab",
+  "sourceProject": "Fintech-AutoSiteConfiguration",
+  "files": [
+    {
+      "path": "Data/ApplicationDBContext.cs",
+      "sourceSha256": "CF71DA2955D64743341067BE13B8BD5DB0AE6B68E72462BA8FAA460AA4EF7919",
+      "functionSha256": "CF71DA2955D64743341067BE13B8BD5DB0AE6B68E72462BA8FAA460AA4EF7919",
+      "byteIdentical": true
+    },
+    {
+      "path": "Services/HelperService.cs",
+      "sourceSha256": "41D26E7D17A4D6A61331C290FD5E2364B9CE276CACBF24DA261EF18E676B26F7",
+      "functionSha256": "41D26E7D17A4D6A61331C290FD5E2364B9CE276CACBF24DA261EF18E676B26F7",
+      "byteIdentical": true
+    },
+    {
+      "path": "Services/FileHelperService.cs",
+      "sourceSha256": "D9880F5C49CD64BEA73BAED04D261798B96EFD56EA0CC13CC4461314EE632BDA",
+      "functionSha256": "8499C29FD3925561AD288C8B007E9B2C4D368A373F0D49ECF11370C80E94FAF1",
+      "byteIdentical": false
+    },
+    {
+      "path": "Services/EmailService.cs",
+      "sourceSha256": "6463782E2F6DF8C9EB5FF3EF22D7318F7548947E23A908D6C28DD4D33D99F6F4",
+      "functionSha256": "41AA440F73C906E71BE9E9038CE670BCD77FFA789C4FC0ECA6291E7193A00E49",
+      "byteIdentical": false
+    },
+    {
+      "path": "Models/DTOs/Response/SiteAndProductResponse.cs",
+      "sourceSha256": "A455B1A05C64E4DD09CA4AB4B7DD81ACF194E1B5D8A850910C72164FCD2FFF27",
+      "functionSha256": "A455B1A05C64E4DD09CA4AB4B7DD81ACF194E1B5D8A850910C72164FCD2FFF27",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/DTOs/Response/DocumentNodeResponse.cs",
+      "sourceSha256": "B0DE62858962751212D93DFC8CC4CD4AB3DBD59BA8C3379526A4D2F9907C797C",
+      "functionSha256": "B0DE62858962751212D93DFC8CC4CD4AB3DBD59BA8C3379526A4D2F9907C797C",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/DTOs/Response/AssetResponse.cs",
+      "sourceSha256": "A7D03EAF1B62D03858ABD9A91B9D685BA877C28AD26DB0CD0D898ED5DD9BE327",
+      "functionSha256": "A7D03EAF1B62D03858ABD9A91B9D685BA877C28AD26DB0CD0D898ED5DD9BE327",
+      "byteIdentical": true
+    },
+    {
+      "path": "Services/ParserService.cs",
+      "sourceSha256": "9AB211BE4BC68C0553B609EAA0C6A5F510DB7FD57B31BAFAC3A48AE7EE676E4C",
+      "functionSha256": "77312203A9FB00BD5F137AE17E0DADDC7B5C484BC58A813FFC2C7AC123AAA78E",
+      "byteIdentical": false
+    },
+    {
+      "path": "Models/DTOs/Request/ParseDataRequest.cs",
+      "sourceSha256": "02B87519804D3061831C5CB532C6D012BE4EA82CC8F9D6C90F1A41A3FE74707E",
+      "functionSha256": "02B87519804D3061831C5CB532C6D012BE4EA82CC8F9D6C90F1A41A3FE74707E",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/DTOs/Request/CreatePumpMappingRequest.cs",
+      "sourceSha256": "9EF105AECA15F72563AC0046D2D219F0169BB4A82F10F69F306B1D7230CA47C4",
+      "functionSha256": "9EF105AECA15F72563AC0046D2D219F0169BB4A82F10F69F306B1D7230CA47C4",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/DTOs/Request/CreateAssetRequest.cs",
+      "sourceSha256": "5B7D48B29FC4935142CDE30ECCBBAB986D23A2F1B8DEE10E9C0C6D06C8F36BD7",
+      "functionSha256": "5B7D48B29FC4935142CDE30ECCBBAB986D23A2F1B8DEE10E9C0C6D06C8F36BD7",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/DTOs/DataValidationModel.cs",
+      "sourceSha256": "409252FADA42B3A9891D6C1A0B95763DFDEFB671AC84BF6BB077D832378BCA3E",
+      "functionSha256": "409252FADA42B3A9891D6C1A0B95763DFDEFB671AC84BF6BB077D832378BCA3E",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/Constants/ApplicationConstants.cs",
+      "sourceSha256": "1834852B35C93DE5CDF1597184C5AD8B4D57FC11406560CCACA418C6F3FCEDA0",
+      "functionSha256": "1834852B35C93DE5CDF1597184C5AD8B4D57FC11406560CCACA418C6F3FCEDA0",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/Omni_Fintech_TankMapping.cs",
+      "sourceSha256": "0DF9C9DD6749BD49A156FF47C1CAC133AC2DE3D5FA62BBA15125E81848323FA1",
+      "functionSha256": "0DF9C9DD6749BD49A156FF47C1CAC133AC2DE3D5FA62BBA15125E81848323FA1",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/ApplicationSettings.cs",
+      "sourceSha256": "99589D2197923009DE13F5F6E02E0944E1AC7937986188ADCA95780971CC9933",
+      "functionSha256": "99589D2197923009DE13F5F6E02E0944E1AC7937986188ADCA95780971CC9933",
+      "byteIdentical": true
+    },
+    {
+      "path": "Models/DTOs/Request/CreateTankMappingRequest.cs",
+      "sourceSha256": "00AA70AB653861699AC955EB91A36A36E9645CFEAE93010731EF0D8531B3094E",
+      "functionSha256": "00AA70AB653861699AC955EB91A36A36E9645CFEAE93010731EF0D8531B3094E",
+      "byteIdentical": true
+    },
+    {
+      "path": "Services/SQLService.cs",
+      "sourceSha256": "CC18A9DCC97A9AF289F57E97E1ECC9977728DA3658E246DB329AFD63F9891ECE",
+      "functionSha256": "CC18A9DCC97A9AF289F57E97E1ECC9977728DA3658E246DB329AFD63F9891ECE",
+      "byteIdentical": true
+    }
+  ],
+  "storageMode": "SFTP: con-files container, temporary parser downloads, remote routing"
+}

@@ -1,74 +1,54 @@
-using log4net;
-using log4net.Appender;
-using log4net.Layout;
-using log4net.Repository.Hierarchy;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging.Abstractions;
 using System.Text.Json;
-using FintechEtl.FunctionApp;
-using CSVReader;
-using System.Data.SqlClient;
+using FintechAutoSiteConfiguration.FunctionApp.Storage;
 
-var hierarchy = (Hierarchy)LogManager.GetRepository();
-hierarchy.Root.AddAppender(new ConsoleAppender { Layout = new PatternLayout("%date %-5level %logger - %message%newline%exception") });
-hierarchy.Root.Level = log4net.Core.Level.Info;
-hierarchy.Configured = true;
-
-if (args.Contains("--prepare-con"))
+// Read-only connectivity check: never resolves the parser or connects to SQL.
+if (args.Contains("--list-input"))
 {
-    using var json = JsonDocument.Parse(File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json")));
-    foreach (var value in json.RootElement.GetProperty("Values").EnumerateObject())
-        Environment.SetEnvironmentVariable(value.Name, value.Value.GetString());
-    // Provision directories only; never processes archives or writes SQL data.
-    EtlTimer.PrepareConFolders(EtlSettings.Load());
-    return;
-}
-
-if (args.Contains("--verify-sql"))
-{
-    var local = Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json");
-    using var json = JsonDocument.Parse(File.ReadAllText(local));
-    foreach (var value in json.RootElement.GetProperty("Values").EnumerateObject())
-        Environment.SetEnvironmentVariable(value.Name, value.Value.GetString());
-    var settings = EtlSettings.Load();
-    SqlSchemaVerifier.Verify(settings.SqlConnectionString);
-    var mapping = new OmniFintechMapping(LogManager.GetLogger(typeof(OmniFintechMapping)));
-    Console.WriteLine($"Existing ETL mapping loaded; FC site 600005 maps to Omni site {mapping.getOmniSiteID(600005)}.");
-    return;
-}
-
-// Local one-shot execution uses the same ETL method as the timer.
-if (args.Contains("--scan-once") || args.Contains("--process-once"))
-{
-    var processOnce = args.Contains("--process-once");
-    var local = Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json");
-    if (!File.Exists(local)) local = Path.Combine(AppContext.BaseDirectory, "local.settings.json");
-    using var json = JsonDocument.Parse(File.ReadAllText(local));
-    foreach (var value in json.RootElement.GetProperty("Values").EnumerateObject())
-        Environment.SetEnvironmentVariable(value.Name, value.Value.GetString());
-    if (!processOnce && !string.Equals(Environment.GetEnvironmentVariable("EtlDryRun"), "true", StringComparison.OrdinalIgnoreCase))
-        throw new InvalidOperationException("--scan-once requires EtlDryRun=true.");
-    if (processOnce) Environment.SetEnvironmentVariable("EtlDryRun", "false");
-    Environment.SetEnvironmentVariable("EtlLocalRun", "true");
-    var siteIndex = Array.IndexOf(args, "--site");
-    if (siteIndex >= 0 && siteIndex + 1 < args.Length)
-        Environment.SetEnvironmentVariable("EtlLocalSiteFilter", args[siteIndex + 1]);
-    var siteMinIndex = Array.IndexOf(args, "--site-min");
-    if (siteMinIndex >= 0 && siteMinIndex + 1 < args.Length)
-        Environment.SetEnvironmentVariable("EtlLocalSiteMin", args[siteMinIndex + 1]);
-    var siteMaxIndex = Array.IndexOf(args, "--site-max");
-    if (siteMaxIndex >= 0 && siteMaxIndex + 1 < args.Length)
-        Environment.SetEnvironmentVariable("EtlLocalSiteMax", args[siteMaxIndex + 1]);
-    var maxIndex = Array.IndexOf(args, "--max-files");
-    if (maxIndex >= 0 && maxIndex + 1 < args.Length)
-        Environment.SetEnvironmentVariable("EtlLocalMaxFiles", args[maxIndex + 1]);
-    var runner = new EtlTimer(NullLogger<EtlTimer>.Instance);
-    runner.Run(null);
-    if (runner.LastRunFailed > 0) Environment.ExitCode = 1;
+    var configuration = new ConfigurationBuilder();
+    var localPath = Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json");
+    if (File.Exists(localPath))
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(localPath));
+        configuration.AddInMemoryCollection(document.RootElement.GetProperty("Values").EnumerateObject()
+            .Select(property => new KeyValuePair<string, string?>(property.Name.Replace("__", ":"), property.Value.GetString())).ToArray());
+    }
+    var settings = configuration.AddEnvironmentVariables().Build();
+    using var remote = new SftpRemoteFiles(SftpConnectionSettings.Load(settings));
+    var input = SftpConnectionSettings.NormalizeRemotePath(settings["ApplicationSettings:UnprocessedFolder"] ?? "/Unprocessed");
+    Console.WriteLine("CON container directories: " + string.Join(", ", remote.List("/").Where(file => file.IsDirectory).Select(file => file.Name)));
+    if (!remote.Exists(input)) throw new DirectoryNotFoundException("The configured CON input directory does not exist.");
+    Console.WriteLine($"CON input {input}: {remote.List(input).Count(file => file.IsRegularFile && file.Name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))} CSV files.");
     return;
 }
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
+    .ConfigureAppConfiguration(configuration => configuration.AddEnvironmentVariables())
+    .ConfigureServices((context, services) =>
+    {
+        services.AddOptions<ApplicationSettings>()
+            .Bind(context.Configuration.GetSection("ApplicationSettings"))
+            .Validate(settings => !string.IsNullOrWhiteSpace(settings.AzureSql),
+                "ApplicationSettings__AzureSql is required.")
+            .Validate(settings => new[]
+            {
+                settings.UnprocessedFolder, settings.ProcessedFolder, settings.ExceptionFolder,
+                settings.DuplicateFolder, settings.ConfigurationUpdateFolder, settings.DiscardedFolder
+            }.All(path => !string.IsNullOrWhiteSpace(path) && path.StartsWith('/') &&
+                !path.Contains('\\') && !path.Split('/').Any(segment => segment is "." or "..") && path.Trim('/').Length > 0),
+                "All six ApplicationSettings folders must be absolute SFTP paths inside the CON container.")
+            .ValidateOnStart();
+
+        services.AddScoped<ParserService>();
+        services.AddScoped<SQLService>();
+        services.AddScoped<FileHelperService>();
+        services.AddSingleton(_ => SftpConnectionSettings.Load(context.Configuration));
+        services.AddScoped<IRemoteFiles, SftpRemoteFiles>();
+        services.AddScoped<IConfigurationFiles, SftpConfigurationFiles>();
+    })
     .Build();
-host.Run();
+
+await host.RunAsync();

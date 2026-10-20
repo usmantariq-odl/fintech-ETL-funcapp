@@ -1,219 +1,88 @@
-# Fintech ETL Azure Function
+# Auto site configuration Azure Function
 
-The .NET 10 isolated timer scans Azure SFTP every three minutes. Numeric site IDs of any length are supported when they fit a positive SQL INT. Sites are discovered only under `/Unprocessed`; archives are read from `/Unprocessed/<site ID>/input` and processed sequentially per site, with four site workers by default. `/Unprocessed/<site ID>/output` is a sibling folder reserved for outgoing files and is not scanned by ETL.
+The .NET 10 isolated Function runs every five minutes (`0 */5 * * * *`) and uses the original auto site configuration parser and SQL logic from `FintechAutoSiteConfiguration` at commit `fe0c7e7`. `RunOnStartup=false`, `UseMonitor=true`; each invocation completes one scan.
 
-The October 19, 2026 comparison found missing TGZ, price-response, CON, MagLink, deterministic CSV ordering and partial-success behavior. These are now implemented. See [PARITY.md](PARITY.md) for the comparison, intentional deployment differences and verification limits.
+## Input and routing
 
-## Inputs and routing
+Connect to `fintechsftpdata.blob.core.windows.net` using the CON-specific username `fintechsftpdata.con-files.sftpadmin`. This selects the `con-files` container. The Function reads `/Unprocessed/*.csv` through SFTP. It downloads temporary parser inputs, then renames the original remote file into the appropriate folder in that same container. No Azure Files mount is needed.
 
-ZIP, TGZ and TAR.GZ share one processing pipeline. CSV processing order matches the main ETL: RESFPR → PCA → PCD → GRP → PCH → PSL → TIN → TDD → PPD → TAS → other CSVs. Unknown CSVs are preserved, as in the main repo. CON CSVs are forwarded to their configured destinations, including for unconfigured sites.
-
-Destinations at the SFTP container root:
-
-| Result | Destination |
+| Result | Container path |
 | --- | --- |
-| Successful archive | `/Processed/<site ID>/<original name>` |
-| Successful regenerated archive | Copy to `/RegeneratedFile/<site ID>/`, then move to `/Processed/<site ID>/` |
-| Some CSVs failed | Filtered successful CSV archive in `/Processed/<site ID>/`; filtered failed CSV archive in `/ExceptionFile/<site ID>/` |
-| All CSVs failed or archive is corrupt | `/ExceptionFile/<site ID>/<original name>` |
-| Inactive/unmapped site | `/notconfigured/<site ID>/<original name>` after CON forwarding |
-| Filename does not begin with its site folder ID | `/invalidFile/<site ID>/<original name>` |
-| MagLink success / inactive site / data error | `/MagLinkProcessed/<site ID>/`, `/MagLinkNotConfigured/<site ID>/`, `/MagLinkException/<site ID>/` |
+| Successfully configured/activated | `/Processed/<FC site ID>/<filename>` |
+| Configuration update for an active site | `/ConfigurationUpdate/<FC site ID>/<filename>` |
+| Invalid file or processing error | `/Exception/<FC site ID>/<filename>` plus a `.txt` error sidecar |
+| Older file after the site's newest file is processed | `/Discarded/<FC site ID>/<filename>` |
+| Duplicate route, if requested by the original helper | `/Duplicate/<FC site ID>/<filename>` |
 
-Partial-result archives retain their original extension and nested CSV paths. Input is deleted only after both filtered archives are published. An existing archive destination is preserved; subsequent versions go under `duplicate`. SQL, local I/O, CON delivery and SFTP failures leave input for retry. Regenerated files require a 14-digit `yyyyMMddHHmmss` timestamp immediately after the site ID; hourly recalculation uses the mapped Omni site and timestamp ±1 hour. The timestamp is validated before inserting rows.
+Approved reconfiguration reads the newest CSV in `/ConfigurationUpdate/<FC site ID>` using the original portal-status rules. Unknown/unapproved sites retain their input for a later scan. The input directory must exist; routing directories are created on demand. Folder names are case-sensitive. ETL should deliver CON CSVs to `/Unprocessed` using its own `ConSftpDestinations` setting.
 
-The requested container layout is:
+The CON SFTP user needs list/read, create/write and rename/delete permissions in this container. SHA256 host-key verification is required. Do not run the original console scanner against the same files after cutover.
 
-```text
-sftp-data/
-  Unprocessed/
-    <site ID>/
-      input/
-      output/
-  Processed/<site ID>/<original archive>
-  ExceptionFile/<site ID>/<original archive>
-  invalidFile/<site ID>/<original archive>
-  notconfigured/<site ID>/<original archive>
-  RegeneratedFile/<site ID>/<original archive>
-```
+Existing output filenames are preserved; collisions receive a unique suffix. Files changed during download or before routing are retained. A transport failure aborts the scan and is excluded from the parser's data-error cleanup, preventing a storage outage from clearing a site's SQL configuration. There is no cross-service transaction between SQL and remote routing: interruption after SQL commits can replay processing and notifications. Filenames must be immutable and producers should upload to temporary names before renaming to `.csv`.
 
-On October 19, 2026, the user requested a reset of existing `sftp-data` folders while preserving site `111111`. That site was moved intact to `/Unprocessed/111111`; its existing empty `input` and `output` directories were verified before and after the move. The other 1,005 old top-level directories and their contents were removed, then the empty root archive folders above were created. `con-files` was outside the cleanup scope and was not changed. Live runs ensure `input` and `output` exist for discovered sites; dry runs do not create folders.
+## Private Azure settings
 
-## Configuration
+`azure-app-settings.local.json` contains the selected real settings in Azure Portal Advanced edit format: an array of `name`, `value`, `slotSetting` entries. It is Git-ignored and excluded from build output, publish output and the ZIP. Paste its contents into the new Function App's environment variables. It includes the supplied host storage/monitoring settings, CON SFTP credentials, the `FintechStagDB` SQL connection, remote folder paths, and the existing main application's email settings. Credentials are not included in this README or the example templates.
 
-Start with [local.settings.example.json](local.settings.example.json). Private `local.settings.json` and `azure-app-settings.local.json` are ignored and excluded from publication. Production settings belong in the deployed Function App's application settings/environment variables, or managed secret references. Do not upload the private local settings file.
+The original `FintechSqlConnectionString` value is mapped to `ApplicationSettings__AzureSql`, which the original SQL service uses. `SftpUsername`, `EtlDryRun`, `EtlWorkerCount` and `ConSftpDestinations` are omitted: they belong to the ETL application. `PollingIntervalInMinutes` is unnecessary because the Function timer controls scheduling.
 
 | Setting | Purpose |
 | --- | --- |
-| `AzureWebJobsStorage` | Function host storage; required by the timer host |
-| `FUNCTIONS_WORKER_RUNTIME` | `dotnet-isolated` |
-| `SftpHost`, `SftpPort`, `SftpUsername`, `SftpPassword` | SFTP connection; port defaults to 22 |
-| `SftpHostKeySha256` | Verified SHA256 host fingerprint; separate multiple fingerprints with `;` |
-| `FintechSqlConnectionString` | Target database; current safety guard requires `Initial Catalog=FintechStagDB` |
-| `EtlDryRun` | `true` lists eligible files without downloading, SQL processing or remote writes; `false` enables processing |
-| `EtlWorkerCount` | Concurrent site workers, 1–32; default 4 |
-| `EtlMinimumFileAgeSeconds` | Minimum input age; default 60 seconds |
-| `ConSftpUsername` | Container-qualified CON login: `fintechsftpdata.con-files.sftpadmin`; uses the existing SFTP host/password/fingerprint |
-| `ConSftpDestinations` | Absolute directories within the CON connection's container, separated by `;`; configured as `/Unprocessed` |
-| `MagLinkSftpRoot` | Optional absolute SFTP root containing `<site ID>/stockLevels*.csv` and `<site ID>/deliveries*.csv`; empty disables discovery |
-| `SftpProvisioningSubscriptionId` | Azure subscription containing the SFTP storage account |
-| `SftpProvisioningResourceGroup` | Resource group containing that account |
-| `SftpProvisioningStorageAccount` | Storage account whose local users are provisioned; must match `SftpHost` and `SftpUsername` |
+| `AzureWebJobsStorage` | Function host storage and timer locking, separate from the CON data account |
+| `FUNCTIONS_WORKER_RUNTIME` / `FUNCTIONS_EXTENSION_VERSION` | `dotnet-isolated` / `~4` |
+| `WEBSITE_RUN_FROM_PACKAGE` | `1` for Dedicated/Premium ZIP deployment |
+| `SftpHost`, `SftpPort`, `SftpPassword` | CON SFTP server credentials |
+| `ConSftpUsername` | Container-specific SFTP user; the ETL data-container username is not used |
+| `SftpHostKeySha256` | Verified SHA256 fingerprints, separated by semicolons |
+| `ApplicationSettings__AzureSql` | Target SQL connection |
+| `ApplicationSettings__UnprocessedFolder` | `/Unprocessed` |
+| `ApplicationSettings__ProcessedFolder` | `/Processed` |
+| `ApplicationSettings__ExceptionFolder` | `/Exception` |
+| `ApplicationSettings__DuplicateFolder` | `/Duplicate` |
+| `ApplicationSettings__ConfigurationUpdateFolder` | `/ConfigurationUpdate` |
+| `ApplicationSettings__DiscardedFolder` | `/Discarded` |
+| `ApplicationSettings__EmailRecipients` | Comma-separated recipients from the original application |
+| `AutoSiteEmailConnectionString` / `AutoSiteEmailSender` | Original email service connection and verified sender |
 
-### Create a site SFTP user over HTTP
+`local.settings.json` has the same data and host settings, including the supplied Azure host storage account. It is also private and excluded from publication. Local `func start` performs real processing; it was not run against these settings. Sanitized examples are supplied for future checkouts.
 
-The same app now exposes `POST /api/sftp/users` (`CreateSftpUser`). It requires a Function access key in the `x-functions-key` header. Use HTTPS, keep that key on a trusted backend, and retain the returned password securely; neither requests nor responses containing credentials should be logged by the caller.
+## Build, verify and deploy
 
-```http
-POST https://<function-app>.azurewebsites.net/api/sftp/users
-Content-Type: application/json
-x-functions-key: <function-key>
-
-{"username":"123456"}
-```
-
-`username` is also the site ID: a JSON string containing an integer from 1 to 2147483647, without leading zeros. The endpoint adds the `user` prefix for the Azure SFTP account, so `123456` creates `user123456` with login `fintechsftpdata.user123456`. Send the numeric username without the prefix. A separate `siteId` is no longer accepted. Extra fields, duplicate fields, invalid paths and bodies larger than 4096 bytes are rejected.
-
-**Caller-chosen passwords are not supported by Azure Blob SFTP.** Azure generates the SFTP password and the endpoint returns it once. Sending a `password` field returns HTTP 400 with `success:false` and error code `CustomPasswordNotSupported`, before any provisioning. The submitted password is never applied, persisted or echoed. See [Microsoft's password limitation](https://learn.microsoft.com/en-us/azure/storage/blobs/secure-file-transfer-protocol-support#passwords).
-
-Success is HTTP 201:
-
-```json
-{
-  "success": true,
-  "siteId": "123456",
-  "username": "user123456",
-  "loginUsername": "fintechsftpdata.user123456",
-  "host": "fintechsftpdata.blob.core.windows.net",
-  "port": 22,
-  "homeDirectory": "sftp-data/Unprocessed/123456",
-  "password": "<Azure-generated-password>",
-  "error": null,
-  "requestId": "<correlation-id>"
-}
-```
-
-The endpoint creates `sftp-data/Unprocessed/123456/{input,output}`. The site and both child directories are owned by the new Azure local-user ID, have its unique primary group, and use `0700` permissions. The user has ACL authorization and **no container-wide permission scopes**, so access is confined to its own site. The common ancestors permit traversal, with no read/write permission for other users. Existing sibling owners and ACLs are retained; provisioning refuses to proceed if a sibling branch or the CON container root exposes access to other users. Keep any additional containers private as well. This follows [Azure's local-user ACL model](https://learn.microsoft.com/en-us/azure/storage/blobs/secure-file-transfer-protocol-support#access-control-lists-acls), including its requirement to set local-user ownership through SFTP.
-
-Before returning the password, the endpoint logs in as the new user, verifies read/write/delete in `input` and `output`, verifies listing of the site, checks denial of ancestor/sibling listings and explicitly checks that a `con-files` login is denied. Azure authentication is disabled while the folders are being configured. Password access is enabled only after ownership/ACL checks. The password is generated by Azure and returned once with `Cache-Control: no-store`; the app does not persist or log it.
-
-Failures return `success:false`, `password:null`, an `error` object and a `requestId`. For example, an existing username returns HTTP 409:
-
-```json
-{
-  "success": false,
-  "password": null,
-  "error": {
-    "code": "UserAlreadyExists",
-    "message": "The SFTP username already exists. Its password and access were not changed."
-  },
-  "requestId": "<correlation-id>"
-}
-```
-
-Other codes include `InvalidRequest`/`InvalidUsername`/`CustomPasswordNotSupported` (400), `SiteAlreadyExists`/`SiteAlreadyAssigned`/`ProvisioningBusy` (409), `UnsafeContainerAcl`/`ProvisioningNotConfigured` (503), and Azure/access verification failures (500/502). An existing site folder is never reassigned. Site assignment checks include users with homes in the former `sftp-data/<site>` layout; deleting an old folder does not remove its Azure local user. Existing users require a separate migration/password-recovery operation if their old home needs updating. Existing clients must change their request from `siteId` plus username to the numeric `username` only, and read failures from `error` instead of `exception`.
-
-Provisioning requests serialize across app instances using a session SQL lock in `FintechStagDB`. The endpoint requires that SQL connection even when `EtlDryRun=true`; the dry-run setting applies to the ETL timer, and does not disable this explicit onboarding endpoint. It takes no ETL data or schema action. Do not provision the same usernames concurrently through another administration tool; Azure's local-user PUT API is create-or-update. After a failure following creation, the app disables the new user's authentication, deletes only the empty directories created by that request, then removes the user. This keeps the directory owner ID resolvable during cleanup. `ProvisioningCleanupFailed` requires administrator inspection. An ambiguous Azure create response, a process crash, or a lost HTTP success response also requires inspecting the username/site before retrying; duplicate requests never reset an existing user's password.
-
-Before deployment, enable the Function App's system-assigned managed identity and grant it these management actions **scoped to `fintechsftpdata`**: local-user read, write, delete and regeneratePassword. Blob data RBAC and account-key access are not required for this endpoint; folder/ACL operations reuse the pinned `sftpadmin` SFTP connection, which requires its existing Modify Ownership/Modify Permissions rights. [Azure managed roles and narrow assignment scopes](https://learn.microsoft.com/en-us/azure/role-based-access-control/role-assignments) apply independently of SFTP folder ACLs.
-
-The deployment helper enables that identity, creates/assigns a custom role with only those four actions, and sets the three nonsecret resource settings:
+Use Functions v4 with .NET 10 isolated on a Dedicated or Elastic Premium plan. Enable Always On on Dedicated. `host.json` retains the existing ETL Function App's one-day timeout. Open this folder in VS Code for the configured Azure Functions deploy task, or run:
 
 ```powershell
-.\deployment\Configure-SftpProvisioning.ps1 -FunctionAppName '<your-ETL-function-app>'
+.\scripts\publish.ps1
+& "$env:USERPROFILE\.dotnet10\dotnet.exe" run --project tests\FintechAutoSiteConfiguration.RegressionTests.csproj --configuration Release
 ```
 
-If the Function App is in a different subscription/resource group, also supply
-`-FunctionSubscriptionId` and `-FunctionResourceGroup`. `-SubscriptionId` continues
-to select the storage account subscription for the role definition/assignment and
-`SftpProvisioningSubscriptionId` setting. Both subscriptions must belong to the same tenant.
+The publish script finds .NET on PATH or in this machine's `.dotnet10` folder. It validates the generated timer metadata and private-settings exclusion, then creates `artifacts/fintech-autosite-functionapp.zip` with host metadata at the root, including hidden host dependencies.
 
-Run it with an Azure account permitted to create roles/assignments; allow RBAC propagation. The three settings are also saved in `local.settings.example.json` and both ignored private settings files. Standard `DefaultAzureCredential` uses the managed identity in Azure; local development uses a signed-in Azure CLI account. The existing SFTP and SQL secrets remain in the private files.
-
-On October 20, 2026 the helper was run for `func-fintech-ETL-stag` in `Fintech-RG-Stag`,
-subscription `0a26d492-a92f-46a4-8d6a-1c87ea1e0432`. Its system-assigned identity was enabled
-(principal `d6fc1b79-295c-470c-ba2e-d0dec52c20c2`) and the three storage-target application
-settings were applied and verified. The Azure function listing now includes both
-`CreateSftpUser` and `FintechEtlTimer`. The storage-role step was rejected with
-`AuthorizationFailed`: the signed-in account lacks `Microsoft.Authorization/roleDefinitions/write`
-and effective IAM role-assignment write permission on the storage account. The role has not
-been created/assigned by this setup attempt; an authorized Azure administrator must complete it.
-
-The administrator can run only the storage IAM step from this repository, without needing
-to change the Function App identity or settings again:
+For a read-only SFTP check that never resolves the parser or SQL service:
 
 ```powershell
-.\deployment\Configure-SftpProvisioning.ps1 `
-    -FunctionAppName 'func-fintech-ETL-stag' `
-    -RoleSetupOnly `
-    -ExistingPrincipalId 'd6fc1b79-295c-470c-ba2e-d0dec52c20c2'
+& "$env:USERPROFILE\.dotnet10\dotnet.exe" bin\Release\net10.0\FintechAutoSiteConfiguration.FunctionApp.dll --list-input
 ```
 
-The default storage subscription/resource group/account in that command are the verified
-`fintechsftpdata` target. Role-only mode and separate-subscription routing have been checked
-with a mocked CLI; that check makes no Azure changes. No code deployment, local-user creation,
-or manual ETL execution was performed as part of this setup attempt.
-
-The offline suite exercises the HTTP handler's response/body/cache rules, validation, duplicate rejection, safe rollback and lock behavior. An optional **live** integration check creates a uniquely named temporary user/site, verifies the actual Azure ACL restrictions and duplicate rejection, then removes its own empty test folders and user:
+After setting the new Function App's runtime and pasting the private settings JSON into its environment variables, deploy the ZIP through VS Code or:
 
 ```powershell
-& $dotnet run --project tests\FintechEtl.RegressionTests.csproj -- --live-provisioning-check
+az functionapp deployment source config-zip --resource-group YOUR_RESOURCE_GROUP --name YOUR_FUNCTION_APP --src artifacts/fintech-autosite-functionapp.zip
 ```
 
-Normal regression runs perform no network access. No deployment or timer execution occurs in this integration check.
+No Azure resources were changed or deployed during preparation.
 
-### CON container and folders
+## Source parity and validation
 
-The selected container is `con-files` in `fintechsftpdata`. Its root has exactly the existing CON consumer's folder names: `ConfigurationUpdate`, `Discarded`, `Exception`, `Processed`, `Unprocessed`. These directories were created and verified through the Azure directory API on October 19, 2026.
+`SOURCE-PARITY.json` records hashes for all 17 copied C# files: 14 remain byte-identical, including SQL, mappings, helper parsing logic and models. The three adaptations are:
 
-Set these Azure Function App **Settings → Environment variables / Application settings**, already saved in the ignored local Azure settings export:
+- `ParserService`: one scan per timer invocation, injected file discovery/routing, and storage exceptions excluded from data-error cleanup.
+- `FileHelperService`: injected SFTP routing and remote exception sidecars; fallback logs use writable temporary storage.
+- `EmailService`: embedded credentials moved to environment settings, preserving recipients and failure handling.
 
-```text
-ConSftpUsername=fintechsftpdata.con-files.sftpadmin
-ConSftpDestinations=/Unprocessed
-```
+The replacement entry point and timer wire scoped services. New `Storage` files implement the SFTP adapter. Application dependency versions are retained; the transitive PKCS package is pinned to patched `9.0.21`. Nine nullable-reference compiler warnings originate in the copied code.
 
-The function opens a separate connection for this container, while the input connection keeps its `sftp-data` home. The path is `/Unprocessed`, without a `/con-files` prefix. Incoming files land directly there; duplicates are preserved in `/Unprocessed/duplicate` with numbered suffixes. Files upload to a temporary name before rename. The other four directories belong to the downstream CON workflow; the ETL does not mark a delivered CON as processed before that consumer handles it. Container-qualified connection details follow [Microsoft's SFTP connection documentation](https://learn.microsoft.com/en-us/azure/storage/blobs/secure-file-transfer-protocol-support-connect).
+Eleven offline storage regression scenarios passed, including all output routes, approved requeueing, collisions, unstable input, transport failures, lost acknowledgements, traversal rejection and temporary cleanup. Build/publish, source parity and ZIP exclusion checks are recorded in `artifacts/verification.json`. No live SQL processing, email delivery or remote file writes were performed.
 
-The function ensures these directories on the first CON delivery per worker. `--prepare-con` can prepare them separately without ETL processing or SQL writes. On October 19, 2026, `sftpadmin` was granted Read, Write, List, Create and Delete permissions (`rwlcd`) for `con-files` after MFA sign-in. The existing `sftp-data` permissions (`rwdlcop`) and home directory (`sftp-data`) were verified unchanged. SFTP was then enabled on the storage account at the user's request. Read-only SFTP logins succeeded for both containers, including verification of all five CON directories.
+The read-only SFTP check on October 19, 2026 reached the supplied account but Azure rejected it with **SSH/SFTP are not enabled for this account**. SFTP must be enabled on `fintechsftpdata` before the Function can access the CON container. Its folder contents and live end-to-end processing could not be verified through SFTP.
 
-For local testing, the same settings are under `Values` in private `local.settings.json`; its dry run remains enabled. If destinations are cleared, an archive containing a CON CSV stays in input for retry. Setting destinations without an explicit CON username is rejected to prevent delivery into the input container. Set `MagLinkSftpRoot` separately when that source path is known.
-
-## Recovery and data integrity
-
-SQL writes for one CSV and its successful checkpoint share a three-minute ambient SQL transaction. A data error rolls back that CSV; independent successful CSVs commit and form the processed portion. Price-response changes and MagLink bulk inserts use the same transaction boundary. MagLink uses typed bulk rows instead of interpolated SQL, supports more than 1,000 rows, and preserves the legacy epoch-1970 filter. Its parsing uses invariant culture.
-
-The existing `Fintech_ProcessedFiles` table stores parent archive records, child CSV checkpoints (`<archive remote path>!/<relative CSV path>`), and an hourly-regeneration checkpoint. Data rows retain the parent archive's `ProcessedFileID`. Successful child checkpoints prevent repeating SQL writes after a platform restart or publication failure. Parent statuses include `Processed`, `Partial`, `Failed`, and `Retry`. Replaying a repaired file that already has a terminal record needs an explicit operator recovery decision; filenames must be immutable for each delivery. A new delivery must have a unique name.
-
-SQL paths are canonical forward-slash paths; lookups also accept the old Windows-backslash form. Checkpoints under `/Unprocessed/<site>/input` also look up their previous `/<site>/input` identity, including child CSV checkpoints, so relocating a site does not itself repeat already committed SQL work. No SQL tracking records were deleted in the container cleanup. SQL queries no longer force stress-database-specific index names. Appropriate indexes still matter for throughput, including the alarm index in [sql/001_alarm_lookup_index.sql](sql/001_alarm_lookup_index.sql).
-
-Live runs validate required schema objects and sequential connection enlistment first. SQL connection pooling and transaction enlistment must stay enabled. Session-owned SQL site locks prevent two instances of this version from processing the same site concurrently. Stop old ETL/backlog processes before cutover; they do not participate in these locks. Mapping caches refresh every 15 minutes.
-
-Archive extraction rejects traversal, duplicate paths, links and special files. Limits: 1,000 entries, 100 MB per entry, 250 MB total extracted data and 250 MB compressed input. Input must remain unchanged during download. Producers should upload under a temporary name and atomically rename to the final name. Outputs also use temporary uploads and rename. Archive and CON publication is at least once: a crash after delivery can preserve an extra duplicate copy, while CSV SQL checkpoints prevent duplicate committed inserts. Downstream CON consumers must tolerate redelivery.
-
-## Build and checks
-
-Use the installed .NET 10 SDK. From this repository:
-
-```powershell
-$dotnet = 'C:\Users\usmtariq\.dotnet10\dotnet.exe'
-& $dotnet build --nologo
-& $dotnet run --project tests\FintechEtl.RegressionTests.csproj
-& $dotnet bin\Debug\net10.0\FintechEtl.FunctionApp.dll --verify-sql
-& $dotnet bin\Debug\net10.0\FintechEtl.FunctionApp.dll --scan-once --site 600005 --max-files 3
-& $dotnet bin\Debug\net10.0\FintechEtl.FunctionApp.dll --prepare-con
-```
-
-`--verify-sql` checks 14 tables, six stored procedures, tracking columns, transaction connection reuse and mapping load without committed data writes. `--scan-once` requires `EtlDryRun=true` and performs read-only discovery. The offline regression suite does not connect to SQL or SFTP.
-
-`--process-once` performs live writes using the timer's method and explicitly enables live processing. Optional local filters: `--site`, `--site-min`, `--site-max`, `--max-files`. Those filters apply only to local one-shot execution. Running the worker DLL directly avoids the Core Tools launch used by `dotnet run` for the function project.
-
-## Deploy and production sign-off
-
-Open this repository folder in VS Code and deploy its publish output using the existing `.vscode` tasks. Alternatively run `dotnet publish -c Release` and deploy `bin/Release/net10.0/publish` with `host.json` and function metadata at the root. The Function host needs its own storage configuration, .NET 10 isolated runtime and Always On for the existing App Service plan. The configured timeout is one day; new file work stops after 23.5 hours, and host cancellation is observed between files. Database transactions may roll back on host termination; checkpoints support restart recovery.
-
-Current verification: 57 offline regression scenarios passed, including the site hierarchy, `/Processed` routing, legacy checkpoint compatibility and HTTP user provisioning. A live temporary-user check passed for site access, sibling/CON isolation and duplicate rejection; the temporary user and empty site directories were removed afterward. Read-only checks on `FintechStagDB` passed for schema, transaction enlistment and mapping load. Simulator site `600005` has no active mapping in this database and would route to `notconfigured`; no site mappings were changed. The CON directories were created and verified in Azure. Both ignored private settings files select `FintechStagDB`, the separate CON login and `/Unprocessed` within `con-files`. Local dry run remains enabled. Build/publish validation is recorded in [PARITY.md](PARITY.md).
-
-The initial CON SFTP preparation attempt failed because Azure returned **SSH/SFTP are not enabled for this account**. The separate CON permission grant succeeded after MFA sign-in. Subsequently, the user requested SFTP enablement; Azure confirmed `isSftpEnabled=true`, and both container connections passed read-only directory checks. No ETL run, deployment or database schema changes were initiated as part of these checks. The currently deployed Azure application settings were not changed; deploy the build and apply the updated private settings export when ready.
-
-Production sign-off still requires a controlled end-to-end test of uploads/routing/regeneration, the MagLink source path if needed, and normal capacity/alert verification. The database guard now targets the requested staging database; secondary-database writes remain disabled.
+References: [Azure SFTP connection usernames](https://learn.microsoft.com/azure/storage/blobs/secure-file-transfer-protocol-support-connect), [timer behavior](https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-timer), [isolated runtime support](https://learn.microsoft.com/en-us/azure/azure-functions/dotnet-isolated-process-guide).
