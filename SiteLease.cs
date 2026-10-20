@@ -9,6 +9,9 @@ internal sealed class SiteLease : IDisposable
     private readonly SqlConnection connection;
     private SiteLease(SqlConnection connection) => this.connection = connection;
     public static SiteLease TryAcquire(string connectionString, string site)
+        => TryAcquireResource(connectionString, "FintechEtl:site:" + int.Parse(site).ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    internal static SiteLease TryAcquireResource(string connectionString, string resource)
     {
         var connection = new SqlConnection(new SqlConnectionStringBuilder(connectionString)
         { Pooling = false, ConnectRetryCount = 0 }.ConnectionString);
@@ -16,7 +19,7 @@ internal sealed class SiteLease : IDisposable
         {
             connection.Open();
             using var command = new SqlCommand("DECLARE @result int; EXEC @result = sys.sp_getapplock @Resource, 'Exclusive', 'Session', 0; SELECT @result;", connection);
-            command.Parameters.Add("@Resource", SqlDbType.NVarChar, 255).Value = "FintechEtl:site:" + int.Parse(site).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            command.Parameters.Add("@Resource", SqlDbType.NVarChar, 255).Value = resource;
             if (Convert.ToInt32(command.ExecuteScalar()) >= 0) return new SiteLease(connection);
             connection.Dispose();
             return null;

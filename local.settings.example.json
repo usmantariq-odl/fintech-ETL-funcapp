@@ -14,6 +14,9 @@
     "EtlMinimumFileAgeSeconds": "60",
     "ConSftpUsername": "fintechsftpdata.con-files.sftpadmin",
     "ConSftpDestinations": "/Unprocessed",
-    "MagLinkSftpRoot": ""
+    "MagLinkSftpRoot": "",
+    "SftpProvisioningSubscriptionId": "43e8904e-4836-4504-8c18-3e88d5fa6b78",
+    "SftpProvisioningResourceGroup": "RG-fintech-prod-sea",
+    "SftpProvisioningStorageAccount": "fintechsftpdata"
   }
 }

@@ -4,6 +4,15 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using CSVReader.models;
 using System.Transactions;
+using FintechEtl.FunctionApp;
+using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
+
+if (args.Contains("--live-provisioning-check"))
+{
+    await LiveProvisioningCheck.Run();
+    return;
+}
 
 var log = LogManager.GetLogger("RegressionTests");
 int passed = 0;
@@ -333,6 +342,83 @@ Test("Successful archives use Processed while error folders stay at root", root 
     Check(result.Outputs.Single().Folder == "Processed", "Success still targets ProcessedFile.");
     Check(SftpLayout.ArchiveFolders.SequenceEqual(new[] { "Processed", "ExceptionFile", "invalidFile", "notconfigured", "RegeneratedFile" }), "Other archive folders changed.");
 });
+Test("Provisioning accepts site strings or integers and validates both fields", _ =>
+{
+    Check(SftpUserRequest.Parse("{\"siteId\":123,\"username\":\"site123\"}") == new SftpUserRequest("123", "site123"), "Integer site rejected.");
+    Check(SftpUserRequest.Parse("{\"siteid\":\"111111\",\"username\":\"user111111\"}").SiteId == "111111", "String site rejected.");
+    foreach (var body in new[] { "{}", "[]", "null", "{", "{\"siteId\":\"../12\",\"username\":\"user123\"}",
+        "{\"siteId\":\"0123\",\"username\":\"user123\"}", "{\"siteId\":1.2,\"username\":\"user123\"}",
+        "{\"siteId\":0,\"username\":\"user123\"}", "{\"siteId\":2147483648,\"username\":\"user123\"}",
+        "{\"siteId\":123,\"username\":\"Admin\"}", "{\"siteId\":123,\"username\":\"a/b\"}",
+        "{\"siteId\":123,\"username\":\"ab\"}", "{\"siteId\":123,\"username\":\"user123\",\"homeDirectory\":\"/\"}",
+        "{\"siteId\":123,\"siteID\":456,\"username\":\"user123\"}", "{\"siteId\":123,\"username\":\"user123\",\"username\":\"other\"}" })
+        Throws<ProvisioningException>(() => SftpUserRequest.Parse(body));
+});
+Test("Provisioning detects prior layout site assignments without prefix collisions", _ =>
+{
+    Check(AzureLocalSftpUsers.ContainsSite("sftp-data/123/input", "sftp-data/123"), "Prior home missed.");
+    Check(AzureLocalSftpUsers.ContainsSite("sftp-data/Unprocessed/123", "sftp-data/Unprocessed/123"), "New home missed.");
+    Check(!AzureLocalSftpUsers.ContainsSite("sftp-data/1234", "sftp-data/123"), "Different site rejected.");
+});
+Test("Provisioning creates ACL folders before enabling password and verifies access", _ =>
+{
+    var fake = new FakeProvisioning();
+    var result = fake.Service.Create(new("123", "user123"), default).GetAwaiter().GetResult();
+    Check(result.HomeDirectory == "sftp-data/Unprocessed/123" && result.LoginUsername == "account.user123" && result.Password == "test-password", "Response contract wrong.");
+    Check(fake.Calls.SequenceEqual(new[] { "lock", "exists", "assigned", "validate", "lease", "create", "lease", "folders", "lease", "password", "verify", "lease" }), "Provisioning order changed.");
+    Check(!fake.Deleted && !fake.RolledBack && fake.Disposed, "Successful provisioning rolled back or leaked resources.");
+});
+foreach (var rejection in new[] { "exists", "assigned", "validate" })
+    Test("Provisioning conflict is read only: " + rejection, _ =>
+    {
+        var fake = new FakeProvisioning { Fail = rejection };
+        Throws<ProvisioningException>(() => fake.Service.Create(new("123", "user123"), default).GetAwaiter().GetResult());
+        Check(!fake.Calls.Contains("create") && !fake.Deleted && !fake.RolledBack, "A conflict changed an existing user/site.");
+    });
+foreach (var failure in new[] { "folders", "password", "verify", "invalid-id" })
+    Test("Provisioning removes its new user on failure: " + failure, _ =>
+    {
+        var fake = new FakeProvisioning { Fail = failure };
+        Throws<ProvisioningException>(() => fake.Service.Create(new("123", "user123"), default).GetAwaiter().GetResult());
+        Check(fake.Deleted && fake.RolledBack, "Incomplete provisioning was left active.");
+        Check(fake.Calls.IndexOf("disable") < fake.Calls.IndexOf("rollback") && fake.Calls.IndexOf("rollback") < fake.Calls.IndexOf("delete"), "Cleanup did not revoke authentication before folder/user deletion.");
+    });
+Test("Provisioning requires distributed lock and refuses to overwrite existing users", _ =>
+{
+    var fake = new FakeProvisioning { Fail = "lock" };
+    Throws<ProvisioningException>(() => fake.Service.Create(new("123", "user123"), default).GetAwaiter().GetResult());
+    Check(!fake.Calls.Contains("exists") && !fake.Calls.Contains("create"), "Provisioning ran without a lock.");
+});
+Test("Provisioning cleanup failure is explicit and does not delete folders after uncertain credential revocation", _ =>
+{
+    var fake = new FakeProvisioning { Fail = "verify", FailCleanup = true };
+    try { fake.Service.Create(new("123", "user123"), default).GetAwaiter().GetResult(); throw new Exception("Failure expected."); }
+    catch (ProvisioningException e) { Check(e.Code == "ProvisioningCleanupFailed", "Manual cleanup requirement hidden."); }
+    Check(!fake.RolledBack, "Folders were deleted while login revocation was uncertain.");
+});
+foreach (var error in new[] { "none", "exists", "verify", "malformed", "oversized" })
+    Test("HTTP provisioning response: " + error, _ =>
+    {
+        var fake = new FakeProvisioning { Fail = error };
+        var function = new CreateSftpUser(NullLogger<CreateSftpUser>.Instance, () => fake.Service);
+        var body = error == "malformed" ? "{" : error == "oversized" ? new string('x', 4097) : "{\"siteId\":123,\"username\":\"user123\"}";
+        var response = function.Run(new TestHttpRequest(body), default).GetAwaiter().GetResult();
+        response.Body.Position = 0;
+        using var json = JsonDocument.Parse(response.Body);
+        Check(response.Headers.GetValues("Cache-Control").Single() == "no-store", "Password response can be cached.");
+        var result = json.RootElement;
+        if (error == "none")
+        {
+            Check((int)response.StatusCode == 201 && result.GetProperty("success").GetBoolean(), "Successful response status wrong.");
+            Check(result.GetProperty("password").GetString() == "test-password" && result.GetProperty("loginUsername").GetString() == "account.user123", "Login credentials missing.");
+        }
+        else
+        {
+            var expected = error is "malformed" ? 400 : error is "oversized" ? 413 : 409;
+            Check((int)response.StatusCode == expected && !result.GetProperty("success").GetBoolean(), "Error HTTP status/success flag wrong.");
+            Check(result.GetProperty("password").ValueKind == JsonValueKind.Null && result.GetProperty("exception").GetProperty("code").GetString() != null, "Failure leaks a password or omits exception details.");
+        }
+    });
 Console.WriteLine($"{passed} regression scenarios passed. No SQL/SFTP connections or live writes were made.");
 
 sealed class FakeBackend : IEtlBackend
@@ -393,4 +479,38 @@ sealed class FakeConFileStore : IConFileStore
         Files.Remove(source);
     }
     public void Delete(string path) => Files.Remove(path);
+}
+
+sealed class FakeProvisioning : ILocalSftpUsers, ISiteSftpFolders, IProvisioningLease
+{
+    public string Fail { get; set; }
+    public bool FailCleanup { get; set; }
+    public bool Deleted { get; private set; }
+    public bool RolledBack { get; private set; }
+    public bool Disposed { get; private set; }
+    public List<string> Calls { get; } = [];
+    public SftpUserProvisioner Service => new(this, () => this, () => { Step("lock"); return this; }, "account", "account.blob.core.windows.net", 22);
+    void Step(string step)
+    {
+        Calls.Add(step);
+        if (Fail == step && step is not "exists" and not "assigned") throw new ProvisioningException(409, "TestFailure", "Expected test failure.");
+    }
+    public Task<bool> Exists(string username, CancellationToken cancellation) { Step("exists"); return Task.FromResult(Fail == "exists"); }
+    public Task<bool> IsSiteAssigned(string site, CancellationToken cancellation) { Step("assigned"); return Task.FromResult(Fail == "assigned"); }
+    public Task<LocalSftpUser> Create(string username, string home, CancellationToken cancellation)
+    {
+        Step("create"); return Task.FromResult(new LocalSftpUser(username, home, Fail == "invalid-id" ? 0 : 2345));
+    }
+    public Task<string> EnablePassword(LocalSftpUser user, CancellationToken cancellation) { Step("password"); return Task.FromResult("test-password"); }
+    public Task Disable(string username, CancellationToken cancellation)
+    {
+        Step("disable"); if (FailCleanup) throw new IOException("Test cleanup error."); return Task.CompletedTask;
+    }
+    public Task Delete(string username, CancellationToken cancellation) { Step("delete"); Deleted = true; return Task.CompletedTask; }
+    public void ValidateNewSite(string site) => Step("validate");
+    public void Create(string site, int ownerId) => Step("folders");
+    public void Verify(string site, string username, string password) => Step("verify");
+    public void Rollback() { Step("rollback"); RolledBack = true; }
+    void IProvisioningLease.Verify() => Step("lease");
+    public void Dispose() => Disposed = true;
 }
