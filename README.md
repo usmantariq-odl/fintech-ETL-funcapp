@@ -126,7 +126,31 @@ If the Function App is in a different subscription/resource group, also supply
 to select the storage account subscription for the role definition/assignment and
 `SftpProvisioningSubscriptionId` setting. Both subscriptions must belong to the same tenant.
 
-Run it with an Azure account permitted to create roles/assignments; allow RBAC propagation. The helper has not been run against a deployed Function App. The three settings are already saved in `local.settings.example.json` and both ignored private settings files. Standard `DefaultAzureCredential` uses the managed identity in Azure; local development uses a signed-in Azure CLI account. The existing SFTP and SQL secrets remain in the private files.
+Run it with an Azure account permitted to create roles/assignments; allow RBAC propagation. The three settings are also saved in `local.settings.example.json` and both ignored private settings files. Standard `DefaultAzureCredential` uses the managed identity in Azure; local development uses a signed-in Azure CLI account. The existing SFTP and SQL secrets remain in the private files.
+
+On October 20, 2026 the helper was run for `func-fintech-ETL-stag` in `Fintech-RG-Stag`,
+subscription `0a26d492-a92f-46a4-8d6a-1c87ea1e0432`. Its system-assigned identity was enabled
+(principal `d6fc1b79-295c-470c-ba2e-d0dec52c20c2`) and the three storage-target application
+settings were applied and verified. The Azure function listing now includes both
+`CreateSftpUser` and `FintechEtlTimer`. The storage-role step was rejected with
+`AuthorizationFailed`: the signed-in account lacks `Microsoft.Authorization/roleDefinitions/write`
+and effective IAM role-assignment write permission on the storage account. The role has not
+been created/assigned by this setup attempt; an authorized Azure administrator must complete it.
+
+The administrator can run only the storage IAM step from this repository, without needing
+to change the Function App identity or settings again:
+
+```powershell
+.\deployment\Configure-SftpProvisioning.ps1 `
+    -FunctionAppName 'func-fintech-ETL-stag' `
+    -RoleSetupOnly `
+    -ExistingPrincipalId 'd6fc1b79-295c-470c-ba2e-d0dec52c20c2'
+```
+
+The default storage subscription/resource group/account in that command are the verified
+`fintechsftpdata` target. Role-only mode and separate-subscription routing have been checked
+with a mocked CLI; that check makes no Azure changes. No code deployment, local-user creation,
+or manual ETL execution was performed as part of this setup attempt.
 
 The offline suite exercises the HTTP handler's response/body/cache rules, validation, duplicate rejection, safe rollback and lock behavior. An optional **live** integration check creates a uniquely named temporary user/site, verifies the actual Azure ACL restrictions and duplicate rejection, then removes its own empty test folders and user:
 

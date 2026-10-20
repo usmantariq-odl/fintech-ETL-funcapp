@@ -4,7 +4,9 @@ param(
     [string]$SubscriptionId = '43e8904e-4836-4504-8c18-3e88d5fa6b78',
     [string]$FunctionSubscriptionId = $SubscriptionId,
     [string]$StorageResourceGroup = 'RG-fintech-prod-sea',
-    [string]$StorageAccount = 'fintechsftpdata'
+    [string]$StorageAccount = 'fintechsftpdata',
+    [switch]$RoleSetupOnly,
+    [string]$ExistingPrincipalId
 )
 $ErrorActionPreference = 'Stop'
 function Assert-AzSuccess { if ($LASTEXITCODE -ne 0) { throw 'Azure CLI command failed. See its error above.' } }
@@ -13,9 +15,18 @@ function Assert-AzSuccess { if ($LASTEXITCODE -ne 0) { throw 'Azure CLI command 
 # Creates a narrowly scoped role and assigns it to this Function App's system identity.
 $storageScope = "/subscriptions/$SubscriptionId/resourceGroups/$StorageResourceGroup/providers/Microsoft.Storage/storageAccounts/$StorageAccount"
 $roleName = "Fintech SFTP User Provisioner $StorageAccount"
-$identityJson = az functionapp identity assign --name $FunctionAppName --resource-group $FunctionResourceGroup --subscription $FunctionSubscriptionId --output json --only-show-errors
-Assert-AzSuccess
-$principalId = ($identityJson | ConvertFrom-Json).principalId
+if ($RoleSetupOnly) {
+    $parsedPrincipalId = [guid]::Empty
+    if (!$ExistingPrincipalId -or ![guid]::TryParse($ExistingPrincipalId, [ref]$parsedPrincipalId)) {
+        throw '-RoleSetupOnly requires a valid -ExistingPrincipalId for the already configured Function App identity.'
+    }
+    $principalId = $ExistingPrincipalId
+}
+else {
+    $identityJson = az functionapp identity assign --name $FunctionAppName --resource-group $FunctionResourceGroup --subscription $FunctionSubscriptionId --output json --only-show-errors
+    Assert-AzSuccess
+    $principalId = ($identityJson | ConvertFrom-Json).principalId
+}
 if (!$principalId) { throw 'Azure did not return the Function App identity.' }
 $roleJson = az role definition list --name $roleName --scope $storageScope --subscription $SubscriptionId --output json --only-show-errors
 Assert-AzSuccess
@@ -45,6 +56,11 @@ else { $roleId = $roles[0].id }
 
 az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal --role $roleId --scope $storageScope --subscription $SubscriptionId --output none --only-show-errors
 Assert-AzSuccess
-az functionapp config appsettings set --name $FunctionAppName --resource-group $FunctionResourceGroup --subscription $FunctionSubscriptionId --settings "SftpProvisioningSubscriptionId=$SubscriptionId" "SftpProvisioningResourceGroup=$StorageResourceGroup" "SftpProvisioningStorageAccount=$StorageAccount" --output none --only-show-errors
-Assert-AzSuccess
-Write-Output 'Managed identity, scoped provisioning role and three nonsecret application settings configured. Allow time for RBAC propagation before testing.'
+if (!$RoleSetupOnly) {
+    az functionapp config appsettings set --name $FunctionAppName --resource-group $FunctionResourceGroup --subscription $FunctionSubscriptionId --settings "SftpProvisioningSubscriptionId=$SubscriptionId" "SftpProvisioningResourceGroup=$StorageResourceGroup" "SftpProvisioningStorageAccount=$StorageAccount" --output none --only-show-errors
+    Assert-AzSuccess
+    Write-Output 'Managed identity, scoped provisioning role and three nonsecret application settings configured. Allow time for RBAC propagation before testing.'
+}
+else {
+    Write-Output 'Scoped storage local-user role assigned to the supplied Function App identity. No Function App settings were changed. Allow time for RBAC propagation.'
+}
