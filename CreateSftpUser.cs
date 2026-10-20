@@ -38,13 +38,13 @@ public sealed class CreateSftpUser(ILogger<CreateSftpUser> logger)
             var user = await service.Create(input, cancellation);
             logger.LogInformation("SFTP provisioning succeeded. RequestId={RequestId}; SiteId={SiteId}; Username={Username}", requestId, user.SiteId, user.Username);
             return await Reply(request, 201, new { success = true, user.SiteId, user.Username, user.LoginUsername,
-                user.Host, user.Port, user.HomeDirectory, user.Password, exception = (object)null, requestId });
+                user.Host, user.Port, user.HomeDirectory, user.Password, error = (object)null, requestId });
         }
         catch (ProvisioningException ex)
         {
             logger.LogWarning("SFTP provisioning rejected. RequestId={RequestId}; Code={Code}", requestId, ex.Code);
             return await Reply(request, ex.Status, new { success = false, password = (string)null,
-                exception = new { code = ex.Code, message = ex.Message }, requestId });
+                error = new { code = ex.Code, message = ex.Message }, requestId });
         }
         catch (Exception ex)
         {
@@ -52,7 +52,7 @@ public sealed class CreateSftpUser(ILogger<CreateSftpUser> logger)
             var type = ex.GetType().Name;
             logger.LogError("SFTP provisioning failed. RequestId={RequestId}; ExceptionType={ExceptionType}", requestId, type);
             return await Reply(request, 500, new { success = false, password = (string)null,
-                exception = new { code = "ProvisioningFailed", type, message = "SFTP user provisioning failed. Check application configuration, Azure permissions and SFTP connectivity." }, requestId });
+                error = new { code = "ProvisioningFailed", type, message = "SFTP user provisioning failed. Check application configuration, Azure permissions and SFTP connectivity." }, requestId });
         }
     }
 

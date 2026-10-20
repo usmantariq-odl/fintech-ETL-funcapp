@@ -1,34 +1,32 @@
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using CSVReader;
 
 namespace FintechEtl.FunctionApp;
 
-internal sealed record SftpUserRequest(string SiteId, string Username)
+internal sealed record SftpUserRequest(string Username)
 {
+    public string SiteId => Username;
+    public string SftpUsername => "user" + Username;
+
     public static SftpUserRequest Parse(string body)
     {
         try
         {
             using var json = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 4 });
             if (json.RootElement.ValueKind != JsonValueKind.Object) throw Invalid();
-            string site = null, username = null;
+            string username = null;
             foreach (var property in json.RootElement.EnumerateObject())
             {
-                if (property.Name.Equals("siteId", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (site != null) throw Invalid();
-                    site = property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString()
-                        : property.Value.ValueKind == JsonValueKind.Number ? property.Value.GetRawText() : throw Invalid();
-                }
-                else if (property.Name.Equals("username", StringComparison.OrdinalIgnoreCase))
+                if (property.Name.Equals("username", StringComparison.OrdinalIgnoreCase))
                 {
                     if (username != null || property.Value.ValueKind != JsonValueKind.String) throw Invalid();
                     username = property.Value.GetString();
                 }
+                else if (property.Name.Equals("password", StringComparison.OrdinalIgnoreCase))
+                    throw new ProvisioningException(400, "CustomPasswordNotSupported", "Azure Blob SFTP does not support caller-chosen passwords. Omit password to receive an Azure-generated SFTP password.");
                 else throw Invalid();
             }
-            var request = new SftpUserRequest(site, username);
+            var request = new SftpUserRequest(username);
             request.Validate();
             return request;
         }
@@ -37,13 +35,11 @@ internal sealed record SftpUserRequest(string SiteId, string Username)
 
     public void Validate()
     {
-        if (!SftpLayout.IsSiteId(SiteId) || SiteId[0] == '0')
-            throw new ProvisioningException(400, "InvalidSiteId", "siteId must be a positive integer up to 2147483647, without leading zeros.");
-        if (Username == null || !Regex.IsMatch(Username, "\\A[a-z0-9]{3,64}\\z", RegexOptions.CultureInvariant))
-            throw new ProvisioningException(400, "InvalidUsername", "username must contain 3–64 lowercase letters or digits.");
+        if (!SftpLayout.IsSiteId(Username) || Username[0] == '0')
+            throw new ProvisioningException(400, "InvalidUsername", "username is the site ID and must be a string containing a positive integer up to 2147483647, without leading zeros. The SFTP username is generated as user{username}.");
     }
 
-    private static ProvisioningException Invalid() => new(400, "InvalidRequest", "Provide a JSON object containing only siteId and username.");
+    private static ProvisioningException Invalid() => new(400, "InvalidRequest", "Provide a JSON object containing only username; it is also the site ID. Azure generates the SFTP password.");
 }
 
 internal sealed class ProvisioningException(int status, string code, string message) : Exception(message)
@@ -92,7 +88,7 @@ internal sealed class SftpUserProvisioner(ILocalSftpUsers users, Func<ISiteSftpF
     {
         request.Validate();
         using var lease = leaseFactory();
-        if (await users.Exists(request.Username, cancellation))
+        if (await users.Exists(request.SftpUsername, cancellation))
             throw new ProvisioningException(409, "UserAlreadyExists", "The SFTP username already exists. Its password and access were not changed.");
         if (await users.IsSiteAssigned(request.SiteId, cancellation))
             throw new ProvisioningException(409, "SiteAlreadyAssigned", "An SFTP user is already assigned to this site, including the previous folder layout.");
@@ -103,7 +99,7 @@ internal sealed class SftpUserProvisioner(ILocalSftpUsers users, Func<ISiteSftpF
         try
         {
             lease.Verify();
-            var user = await users.Create(request.Username, home, cancellation);
+            var user = await users.Create(request.SftpUsername, home, cancellation);
             created = true;
             if (user.UserId <= 0) throw new ProvisioningException(502, "InvalidAzureResponse", "Azure did not return a valid local user ID.");
             lease.Verify();
@@ -113,9 +109,9 @@ internal sealed class SftpUserProvisioner(ILocalSftpUsers users, Func<ISiteSftpF
             var password = await users.EnablePassword(user, cancellation);
             if (string.IsNullOrEmpty(password)) throw new ProvisioningException(502, "InvalidAzureResponse", "Azure did not return the generated password.");
             cancellation.ThrowIfCancellationRequested();
-            folders.Verify(request.SiteId, request.Username, password);
+            folders.Verify(request.SiteId, request.SftpUsername, password);
             lease.Verify();
-            return new(request.SiteId, request.Username, account + "." + request.Username, host, port, home, password);
+            return new(request.SiteId, request.SftpUsername, account + "." + request.SftpUsername, host, port, home, password);
         }
         catch
         {
@@ -126,14 +122,14 @@ internal sealed class SftpUserProvisioner(ILocalSftpUsers users, Func<ISiteSftpF
                     // Revoke authentication before removing folders, keeping the UID resolvable until
                     // its directories are gone. Remove only empty directories created by this request.
                     using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-                    try { await users.Disable(request.Username, cleanup.Token); }
+                    try { await users.Disable(request.SftpUsername, cleanup.Token); }
                     catch
                     {
-                        await users.Delete(request.Username, cleanup.Token);
+                        await users.Delete(request.SftpUsername, cleanup.Token);
                         throw; // Folder cleanup is unsafe after uncertain credential revocation.
                     }
                     try { folders.Rollback(); }
-                    finally { await users.Delete(request.Username, cleanup.Token); }
+                    finally { await users.Delete(request.SftpUsername, cleanup.Token); }
                 }
                 catch
                 {

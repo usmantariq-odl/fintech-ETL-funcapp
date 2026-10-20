@@ -1,0 +1,22 @@
+{
+  "properties": {
+    "roleName": "Fintech SFTP User Provisioner fintechsftpdata",
+    "description": "Manage SFTP local users for site onboarding. Folder ownership and ACL operations use the existing SFTP admin connection.",
+    "assignableScopes": [
+      "/subscriptions/43e8904e-4836-4504-8c18-3e88d5fa6b78/resourceGroups/RG-fintech-prod-sea"
+    ],
+    "permissions": [
+      {
+        "actions": [
+          "Microsoft.Storage/storageAccounts/localusers/read",
+          "Microsoft.Storage/storageAccounts/localusers/write",
+          "Microsoft.Storage/storageAccounts/localUsers/delete",
+          "Microsoft.Storage/storageAccounts/localusers/regeneratePassword/action"
+        ],
+        "notActions": [],
+        "dataActions": [],
+        "notDataActions": []
+      }
+    ]
+  }
+}

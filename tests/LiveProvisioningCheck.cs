@@ -13,8 +13,8 @@ internal static class LiveProvisioningCheck
         var etl = EtlSettings.Load();
         // Dedicated opt-in live check: creates only a unique temporary user/site, never runs the ETL.
         // No generated password or token is written to the console or disk.
-        var request = new SftpUserRequest("209" + Random.Shared.Next(1000000, 9999999), "codextest" + Guid.NewGuid().ToString("N")[..12]);
-        Console.WriteLine($"Live provisioning test: username={request.Username}, siteId={request.SiteId}");
+        var request = new SftpUserRequest("209" + Random.Shared.Next(1000000, 9999999));
+        Console.WriteLine($"Live provisioning test: username={request.SftpUsername}, siteId={request.SiteId}");
         var users = new AzureLocalSftpUsers(settings);
         var service = new SftpUserProvisioner(users, () => new SiteSftpFolders(etl, settings.Account),
             () => new SqlProvisioningLease(etl.SqlConnectionString), settings.Account, etl.Host, etl.Port);
@@ -31,9 +31,9 @@ internal static class LiveProvisioningCheck
         {
             if (succeeded)
             {
-                await users.Disable(request.Username, default);
+                await users.Disable(request.SftpUsername, default);
                 try { await RemoveTemporarySite(etl, request.SiteId); }
-                finally { await users.Delete(request.Username, default); }
+                finally { await users.Delete(request.SftpUsername, default); }
                 Console.WriteLine("Temporary user/site removed. Site 111111 and CON files were not changed.");
             }
         }
