@@ -19,7 +19,7 @@ public sealed class EtlTimer
     public EtlTimer(ILogger<EtlTimer> logger) => this.logger = logger;
 
     [Function("FintechEtlTimer")]
-    public void Run([TimerTrigger("0 */3 * * * *", RunOnStartup = false)] TimerInfo timer, CancellationToken cancellationToken = default)
+    public void Run([TimerTrigger("0 * * * * *", RunOnStartup = false)] TimerInfo timer, CancellationToken cancellationToken = default)
     {
         LastRunFailed = 0;
         var settings = EtlSettings.Load();
