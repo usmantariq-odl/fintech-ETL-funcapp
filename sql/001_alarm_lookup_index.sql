@@ -1,6 +1,7 @@
--- Run only against FintechStagDB. Covers the legacy alarm duplicate lookup.
-IF DB_NAME() <> N'FintechStagDB'
-    THROW 50001, 'Wrong database for ETL staging index', 1;
+-- Manually select the ETL database configured in FintechSqlConnectionString before running.
+-- Covers the legacy alarm duplicate lookup; this script is not run by the Function App.
+IF DB_NAME() IN (N'master', N'model', N'msdb', N'tempdb')
+    THROW 50001, 'Select the intended ETL application database before running this index script', 1;
 
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes

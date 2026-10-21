@@ -8,7 +8,7 @@
     "SftpUsername": "fintechsftpdata.sftpadmin",
     "SftpPassword": "REPLACE_WITH_SECRET",
     "SftpHostKeySha256": "SHA256:REPLACE_WITH_VERIFIED_FINGERPRINT",
-    "FintechSqlConnectionString": "Server=YOUR_SERVER;Initial Catalog=FintechStagDB;User ID=YOUR_USER;Password=YOUR_PASSWORD;Encrypt=True;",
+    "FintechSqlConnectionString": "Server=YOUR_SERVER;Initial Catalog=FintechStressTesting;User ID=YOUR_USER;Password=YOUR_PASSWORD;Encrypt=True;",
     "EtlDryRun": "true",
     "EtlWorkerCount": "4",
     "EtlMinimumFileAgeSeconds": "60",

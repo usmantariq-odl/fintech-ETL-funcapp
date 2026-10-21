@@ -295,12 +295,12 @@ Test("Failed CON publication removes temporary files and retains source", root =
     Check(store.Files.Count == 0 && File.Exists(file), "Failed delivery lost input or exposed a partial file.");
     Throws<InvalidDataException>(() => ConFileDelivery.Deliver(store, Path.Combine(root, "PSL.csv"), "/Unprocessed"));
 });
-Test("Settings select FintechStagDB and a separate CON container login", _ =>
+Test("Settings follow the database environment variable and validate SQL configuration", _ =>
 {
     var overrides = new Dictionary<string, string>
     {
         ["EtlDryRun"] = "true", ["SftpPassword"] = "test", ["SftpHostKeySha256"] = "SHA256:test",
-        ["FintechSqlConnectionString"] = "Server=test;Initial Catalog=FintechStagDB;Integrated Security=true;",
+        ["FintechSqlConnectionString"] = "Server=test;Initial Catalog=FintechStressTesting;Integrated Security=true;",
         ["ConSftpUsername"] = "fintechsftpdata.con-files.sftpadmin", ["ConSftpDestinations"] = "/Unprocessed",
         ["SftpUsername"] = "fintechsftpdata.sftpadmin", ["MagLinkSftpRoot"] = "", ["EtlWorkerCount"] = "3", ["EtlMinimumFileAgeSeconds"] = "60"
     };
@@ -309,13 +309,35 @@ Test("Settings select FintechStagDB and a separate CON container login", _ =>
     {
         foreach (var item in overrides) Environment.SetEnvironmentVariable(item.Key, item.Value);
         var settings = EtlSettings.Load();
-        Check(new System.Data.SqlClient.SqlConnectionStringBuilder(settings.SqlConnectionString).InitialCatalog == "FintechStagDB", "Staging database rejected.");
         Check(settings.Username != settings.ConUsername && settings.ConDestinations.SequenceEqual(new[] { "/Unprocessed" }), "CON container connection mixed with source.");
+        foreach (var database in new[] { "FintechStressTesting", "FintechStagDB", "AnotherEtlDatabase" })
+            foreach (var dryRun in new[] { "true", "false" })
+            {
+                Environment.SetEnvironmentVariable("EtlDryRun", dryRun);
+                var connection = $"Server=test;Database={database};Integrated Security=true;";
+                Environment.SetEnvironmentVariable("FintechSqlConnectionString", connection);
+                settings = EtlSettings.Load();
+                Check(settings.SqlDatabase == database && settings.SqlConnectionString == connection,
+                    "Changing only the connection-string environment variable did not switch the database.");
+            }
         Environment.SetEnvironmentVariable("ConSftpUsername", null);
         Throws<InvalidOperationException>(() => EtlSettings.Load());
         Environment.SetEnvironmentVariable("ConSftpUsername", overrides["ConSftpUsername"]);
-        Environment.SetEnvironmentVariable("FintechSqlConnectionString", "Server=test;Initial Catalog=FintechStressTesting;Integrated Security=true;");
+        foreach (var invalidSql in new[]
+        {
+            "Server=test;Integrated Security=true;", "Server=test;Initial Catalog=;", "Server=test;Database=\" \";",
+            "Server=test;Database=Example;Enlist=false;", "Server=test;Database=Example;Pooling=false;",
+            "Server=test;Database=Example;UnsupportedSetting=secret-value;", "not a connection string"
+        })
+        {
+            Environment.SetEnvironmentVariable("FintechSqlConnectionString", invalidSql);
+            Throws<InvalidOperationException>(() => EtlSettings.Load());
+        }
+        Environment.SetEnvironmentVariable("FintechSqlConnectionString", "");
         Throws<InvalidOperationException>(() => EtlSettings.Load());
+        Environment.SetEnvironmentVariable("EtlDryRun", "true");
+        settings = EtlSettings.Load();
+        Check(settings.SqlConnectionString == "" && settings.SqlDatabase == "", "SQL-free dry run no longer works.");
     }
     finally { foreach (var item in saved) Environment.SetEnvironmentVariable(item.Key, item.Value); }
 });

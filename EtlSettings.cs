@@ -4,7 +4,6 @@ namespace CSVReader;
 
 internal sealed class EtlSettings
 {
-    internal const string ExpectedSqlCatalog = "FintechStagDB";
     public string Host { get; private init; }
     public int Port { get; private init; }
     public string Username { get; private init; }
@@ -13,6 +12,7 @@ internal sealed class EtlSettings
     public bool DryRun { get; private init; }
     public int WorkerCount { get; private init; }
     public string SqlConnectionString { get; private init; }
+    public string SqlDatabase { get; private init; }
     public string MagLinkRoot { get; private init; }
     public string[] ConDestinations { get; private init; }
     public string ConUsername { get; private init; }
@@ -29,10 +29,19 @@ internal sealed class EtlSettings
         var sql = Environment.GetEnvironmentVariable("FintechSqlConnectionString") ?? string.Empty;
         if (!dryRun && string.IsNullOrWhiteSpace(sql))
             throw new InvalidOperationException("FintechSqlConnectionString is required for live processing.");
-        if (!string.IsNullOrWhiteSpace(sql) && !string.Equals(new SqlConnectionStringBuilder(sql).InitialCatalog, ExpectedSqlCatalog, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"FintechSqlConnectionString must target {ExpectedSqlCatalog}. No files were processed.");
-        if (!string.IsNullOrWhiteSpace(sql) && (!new SqlConnectionStringBuilder(sql).Enlist || !new SqlConnectionStringBuilder(sql).Pooling))
-            throw new InvalidOperationException("FintechSqlConnectionString must enable Enlist and Pooling for atomic CSV checkpoints.");
+        SqlConnectionStringBuilder sqlSettings = null;
+        if (!string.IsNullOrWhiteSpace(sql))
+        {
+            try { sqlSettings = new SqlConnectionStringBuilder(sql); }
+            catch (ArgumentException)
+            {
+                throw new InvalidOperationException("FintechSqlConnectionString is not a valid SQL connection string.");
+            }
+            if (string.IsNullOrWhiteSpace(sqlSettings.InitialCatalog))
+                throw new InvalidOperationException("FintechSqlConnectionString must explicitly name a database using Initial Catalog or Database.");
+            if (!sqlSettings.Enlist || !sqlSettings.Pooling)
+                throw new InvalidOperationException("FintechSqlConnectionString must enable Enlist and Pooling for atomic CSV checkpoints.");
+        }
         var workerValue = Environment.GetEnvironmentVariable("EtlWorkerCount");
         var workerCount = string.IsNullOrWhiteSpace(workerValue) ? 4
             : int.TryParse(workerValue, out var configuredWorkers) && configuredWorkers is >= 1 and <= 32
@@ -64,6 +73,7 @@ internal sealed class EtlSettings
             Password = Required("SftpPassword"),
             HostKeySha256 = Required("SftpHostKeySha256"),
             SqlConnectionString = sql,
+            SqlDatabase = sqlSettings?.InitialCatalog ?? string.Empty,
             DryRun = dryRun,
             WorkerCount = workerCount,
             MagLinkRoot = RemoteRoot(Environment.GetEnvironmentVariable("MagLinkSftpRoot")),

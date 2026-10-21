@@ -25,7 +25,7 @@ public sealed class EtlTimer
         var settings = EtlSettings.Load();
         if (!settings.DryRun) SqlSchemaVerifier.Verify(settings.SqlConnectionString);
         logger.LogInformation("Scanning Azure SFTP with {Workers} ETL workers; SQL database: {Database}; dry run: {DryRun}",
-            settings.WorkerCount, EtlSettings.ExpectedSqlCatalog, settings.DryRun);
+            settings.WorkerCount, settings.SqlDatabase, settings.DryRun);
 
         string[] sites;
         using (var discovery = CreateSftp(settings))
