@@ -366,14 +366,15 @@ Test("Successful archives use Processed while error folders stay at root", root 
 });
 Test("Provisioning derives the numeric site and prefixed SFTP username from username", _ =>
 {
-    foreach (var site in new[] { "1", "123", "600003", "2147483647" })
+    foreach (var site in new[] { "1", "123", "600003", "2147483647", "0123", "000001", "007001", "0002147483647" })
     {
         var request = SftpUserRequest.Parse("{\"username\":\"" + site + "\"}");
         Check(request.SiteId == site && request.SftpUsername == "user" + site, "Site or SFTP username was not derived correctly.");
     }
     Check(SftpUserRequest.Parse("{\"UserName\":\"111111\"}").SiteId == "111111", "Case-insensitive field rejected.");
     foreach (var body in new[] { "{}", "[]", "null", "{", "{\"username\":\"../12\"}",
-        "{\"username\":\"0123\"}", "{\"username\":\"1.2\"}", "{\"username\":\"0\"}",
+        "{\"username\":\"000000\"}", "{\"username\":\"1.2\"}", "{\"username\":\"0\"}",
+        "{\"username\":\"0002147483648\"}", "{\"username\":\"+007001\"}",
         "{\"username\":\"2147483648\"}", "{\"username\":\"Admin\"}", "{\"username\":\"a/b\"}",
         "{\"username\":\"user123\"}", "{\"username\":\"123\",\"homeDirectory\":\"/\"}",
         "{\"username\":\"123\",\"siteId\":\"456\"}", "{\"username\":\"123\",\"USERNAME\":\"456\"}",
@@ -473,6 +474,37 @@ Test("HTTP provisioning unexpected errors return false without exposing exceptio
         && result.GetProperty("password").ValueKind == JsonValueKind.Null
         && !result.GetRawText().Contains("secret-exception-content"), "Exception details exposed secrets or omitted the error code.");
 });
+foreach (var site in new[] { "007001", "000001" })
+    Test("HTTP provisioning preserves leading zeros through user and folder operations: " + site, _ =>
+    {
+        var fake = new FakeProvisioning { Site = site };
+        var function = new CreateSftpUser(NullLogger<CreateSftpUser>.Instance, () => fake.Service);
+        var response = function.Run(new TestHttpRequest("{\"username\":\"" + site + "\"}"), default).GetAwaiter().GetResult();
+        response.Body.Position = 0;
+        using var json = JsonDocument.Parse(response.Body);
+        var result = json.RootElement;
+        Check((int)response.StatusCode == 201 && result.GetProperty("success").GetBoolean(), "Leading-zero site was rejected.");
+        Check(result.GetProperty("siteId").GetString() == site, "Response removed leading zeros from the site ID.");
+        Check(result.GetProperty("username").GetString() == "user" + site
+            && result.GetProperty("loginUsername").GetString() == "account.user" + site, "SFTP username removed leading zeros.");
+        Check(result.GetProperty("homeDirectory").GetString() == "sftp-data/Unprocessed/" + site
+            && SftpLayout.Input(site) == "/Unprocessed/" + site + "/input"
+            && SftpLayout.Output(site) == "/Unprocessed/" + site + "/output", "Site folder path removed leading zeros.");
+        Check(result.GetProperty("password").GetString() == "test-password"
+            && response.Headers.GetValues("Cache-Control").Single() == "no-store", "Password response contract changed.");
+        Check(fake.Calls.Contains("verify") && !fake.Deleted && !fake.RolledBack, "Provisioning did not complete access verification.");
+    });
+Test("HTTP leading-zero duplicate user still returns a read-only conflict", _ =>
+{
+    var fake = new FakeProvisioning { Site = "007001", Fail = "exists" };
+    var function = new CreateSftpUser(NullLogger<CreateSftpUser>.Instance, () => fake.Service);
+    var response = function.Run(new TestHttpRequest("{\"username\":\"007001\"}"), default).GetAwaiter().GetResult();
+    response.Body.Position = 0;
+    using var json = JsonDocument.Parse(response.Body);
+    Check((int)response.StatusCode == 409
+        && json.RootElement.GetProperty("error").GetProperty("code").GetString() == "UserAlreadyExists", "Leading-zero duplicate lost its conflict response.");
+    Check(!fake.Calls.Contains("create") && !fake.Deleted && !fake.RolledBack, "Duplicate request changed the existing account.");
+});
 Console.WriteLine($"{passed} regression scenarios passed. No SQL/SFTP connections or live writes were made.");
 
 sealed class FakeBackend : IEtlBackend
@@ -537,6 +569,7 @@ sealed class FakeConFileStore : IConFileStore
 
 sealed class FakeProvisioning : ILocalSftpUsers, ISiteSftpFolders, IProvisioningLease
 {
+    public string Site { get; init; } = "123";
     public string Fail { get; set; }
     public bool FailCleanup { get; set; }
     public bool Deleted { get; private set; }
@@ -549,20 +582,20 @@ sealed class FakeProvisioning : ILocalSftpUsers, ISiteSftpFolders, IProvisioning
         Calls.Add(step);
         if (Fail == step && step is not "exists" and not "assigned") throw new ProvisioningException(409, "TestFailure", "Expected test failure.");
     }
-    static void CheckUsername(string username)
+    void CheckUsername(string username)
     {
-        if (username != "user123") throw new InvalidOperationException("SFTP operation used an unprefixed or incorrect username.");
+        if (username != "user" + Site) throw new InvalidOperationException("SFTP operation used an unprefixed or incorrect username.");
     }
-    static void CheckSite(string site)
+    void CheckSite(string site)
     {
-        if (site != "123") throw new InvalidOperationException("Folder operation used a prefixed or incorrect site ID.");
+        if (site != Site) throw new InvalidOperationException("Folder operation used a prefixed or incorrect site ID.");
     }
     public Task<bool> Exists(string username, CancellationToken cancellation) { CheckUsername(username); Step("exists"); return Task.FromResult(Fail == "exists"); }
     public Task<bool> IsSiteAssigned(string site, CancellationToken cancellation) { CheckSite(site); Step("assigned"); return Task.FromResult(Fail == "assigned"); }
     public Task<LocalSftpUser> Create(string username, string home, CancellationToken cancellation)
     {
         CheckUsername(username);
-        if (home != "sftp-data/Unprocessed/123") throw new InvalidOperationException("Incorrect home directory.");
+        if (home != "sftp-data/Unprocessed/" + Site) throw new InvalidOperationException("Incorrect home directory.");
         Step("create"); return Task.FromResult(new LocalSftpUser(username, home, Fail == "invalid-id" ? 0 : 2345));
     }
     public Task<string> EnablePassword(LocalSftpUser user, CancellationToken cancellation) { CheckUsername(user.Name); Step("password"); return Task.FromResult("test-password"); }

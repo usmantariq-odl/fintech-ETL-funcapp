@@ -35,8 +35,8 @@ internal sealed record SftpUserRequest(string Username)
 
     public void Validate()
     {
-        if (!SftpLayout.IsSiteId(Username) || Username[0] == '0')
-            throw new ProvisioningException(400, "InvalidUsername", "username is the site ID and must be a string containing a positive integer up to 2147483647, without leading zeros. The SFTP username is generated as user{username}.");
+        if (!SftpLayout.IsSiteId(Username))
+            throw new ProvisioningException(400, "InvalidUsername", "username is the site ID and must be a string of digits representing a positive integer up to 2147483647. Leading zeros are allowed and preserved. The SFTP username is generated as user{username}.");
     }
 
     private static ProvisioningException Invalid() => new(400, "InvalidRequest", "Provide a JSON object containing only username; it is also the site ID. Azure generates the SFTP password.");

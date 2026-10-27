@@ -72,7 +72,7 @@ x-functions-key: <function-key>
 {"username":"123456"}
 ```
 
-`username` is also the site ID: a JSON string containing an integer from 1 to 2147483647, without leading zeros. The endpoint adds the `user` prefix for the Azure SFTP account, so `123456` creates `user123456` with login `fintechsftpdata.user123456`. Send the numeric username without the prefix. A separate `siteId` is no longer accepted. Extra fields, duplicate fields, invalid paths and bodies larger than 4096 bytes are rejected.
+`username` is also the site ID: a JSON string of digits representing an integer from 1 to 2147483647. Leading zeros are allowed and preserved in the returned site ID, SFTP username and folder paths. For example, `{"username":"007001"}` creates `user007001`, with login `fintechsftpdata.user007001` and home `sftp-data/Unprocessed/007001`; it creates that home's `input` and `output` directories. Keep the value quoted so its zeros are preserved. The endpoint adds the `user` prefix for the Azure SFTP account; send the numeric username without the prefix. A separate `siteId` is no longer accepted. All-zero IDs, extra fields, duplicate fields, invalid paths and bodies larger than 4096 bytes are rejected.
 
 **Caller-chosen passwords are not supported by Azure Blob SFTP.** Azure generates the SFTP password and the endpoint returns it once. Sending a `password` field returns HTTP 400 with `success:false` and error code `CustomPasswordNotSupported`, before any provisioning. The submitted password is never applied, persisted or echoed. See [Microsoft's password limitation](https://learn.microsoft.com/en-us/azure/storage/blobs/secure-file-transfer-protocol-support#passwords).
 
