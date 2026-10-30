@@ -125,7 +125,7 @@ Grades in the CON file: {string.Join(", ", grades.Select(g => g.Name))}");
                     HoseQuantity = (int?)x.Element("hoses_qty"),
                     TankCapacity = (int?)x.Element("capacity"),
                     Tank_Suction_Mapped_Tank = (int?)x.Element("tank1"),
-                    Hoses = x.Elements().Where(x => x.Name.LocalName.StartsWith("hose", StringComparison.OrdinalIgnoreCase))
+                    Hoses = x.Elements().Where(x => (Regex.IsMatch(x.Name.LocalName, @"^hose\d+$", RegexOptions.IgnoreCase) || (x.Name.LocalName == "hose" && x.HasElements)))
                     .Select(hose => new DocumentNodeHoseResponse
                     {
                         HoseName = hose.Name.LocalName,
@@ -146,70 +146,75 @@ Grades in the CON file: {string.Join(", ", grades.Select(g => g.Name))}");
         }
     }
 
+    public static List<CreateAssetRequest> BuildSiteAssets(ParseDataRequest request)
+    {
+        string fullName = string.Empty, productName = string.Empty;
+        List<CreateAssetRequest> assets = new();
+        if (request.Nodes.Tanks.Any())
+        {
+            foreach (var tank in request.Nodes.Tanks)
+            {
+                productName = getFinalProductName(tank.ProductName, request);
+                fullName = $"Tank_{tank.Id}({productName})";
+                assets.Add(new CreateAssetRequest
+                {
+                    Asset_Name = fullName,
+                    Type = "Asset",
+                    Description = $"{fullName} of site {request.Fintech_SiteId}({request.FC_SiteId}) by {ApplicationConstants.JOB_NAME} Job",
+                    Site_Id_FK = request.Fintech_SiteId,
+                    AssetType = ApplicationConstants.ASSET_TYPE_TANK,
+                    Created_By = ApplicationConstants.JOB_NAME
+                });
+            }
+        }
+
+
+        if (request.Nodes.Pumps.Any())
+        {
+            foreach (var pump in request.Nodes.Pumps)
+            {
+                fullName = $"Pump_{pump.Id}";
+                assets.Add(new CreateAssetRequest
+                {
+                    Asset_Name = fullName,
+                    Type = "Asset",
+                    Description = $"{fullName} of site {request.Fintech_SiteId}({request.FC_SiteId}) by {ApplicationConstants.JOB_NAME} Job",
+                    Site_Id_FK = request.Fintech_SiteId,
+                    AssetType = ApplicationConstants.ASSET_TYPE_PUMP,
+                    Created_By = ApplicationConstants.JOB_NAME
+                });
+                foreach (var hose in pump.Hoses.Where(h => h.RealId is not null))
+                {
+                    if (hose.RealId <= 0)
+                        throw new Exception($@"Error while processing site FC_SiteId: {request.FC_SiteId}!
+Description:
+Nozzle ID '{hose.RealId}' against Pump_{pump.Id} is incorrect and does not meet the Auto Site Configuration criteria.");
+
+                    fullName = $"Nozzle{hose.RealId}_Pump{pump.Id}";
+                    assets.Add(new CreateAssetRequest
+                    {
+                        Asset_Name = fullName,
+                        Type = "Asset",
+                        Description = $"{fullName} of site {request.Fintech_SiteId}({request.FC_SiteId}) by {ApplicationConstants.JOB_NAME} Job",
+                        Site_Id_FK = request.Fintech_SiteId,
+                        AssetType = ApplicationConstants.ASSET_TYPE_NOZZLE,
+                        Created_By = ApplicationConstants.JOB_NAME
+                    });
+                }
+            }
+        }
+
+        return assets;
+    }
+
     public static async Task<bool> CreateSiteAssets(ParseDataRequest request, SQLService _sqlService)
     {
         try
         {
-            string fullName = string.Empty, productName = string.Empty;
-            List<CreateAssetRequest> assets = new();
-
+            var assets = BuildSiteAssets(request);
             int areaId = await _sqlService.CreateArea(request.Fintech_SiteId, request.Fintech_SiteName);
             if (areaId > 0)
             {
-                if (request.Nodes.Tanks.Any())
-                {
-                    foreach (var tank in request.Nodes.Tanks)
-                    {
-                        productName = getFinalProductName(tank.ProductName, request);
-                        fullName = $"Tank_{tank.Id}({productName})";
-                        assets.Add(new CreateAssetRequest
-                        {
-                            Asset_Name = fullName,
-                            Type = "Asset",
-                            Description = $"{fullName} of site {request.Fintech_SiteId}({request.FC_SiteId}) by {ApplicationConstants.JOB_NAME} Job",
-                            Site_Id_FK = request.Fintech_SiteId,
-                            AssetType = ApplicationConstants.ASSET_TYPE_TANK,
-                            Created_By = ApplicationConstants.JOB_NAME
-                        });
-                    }
-                }
-
-
-                if (request.Nodes.Pumps.Any())
-                {
-                    foreach (var pump in request.Nodes.Pumps)
-                    {
-                        fullName = $"Pump_{pump.Id}";
-                        assets.Add(new CreateAssetRequest
-                        {
-                            Asset_Name = fullName,
-                            Type = "Asset",
-                            Description = $"{fullName} of site {request.Fintech_SiteId}({request.FC_SiteId}) by {ApplicationConstants.JOB_NAME} Job",
-                            Site_Id_FK = request.Fintech_SiteId,
-                            AssetType = ApplicationConstants.ASSET_TYPE_PUMP,
-                            Created_By = ApplicationConstants.JOB_NAME
-                        });
-                        foreach (var hose in pump.Hoses.Where(h => h.RealId is not null))
-                        {
-                            if (hose.RealId <= 0)
-                                throw new Exception($@"Error while processing site FC_SiteId: {request.FC_SiteId}!
-Description:
-Nozzle ID '{hose.RealId}' against Pump_{pump.Id} is incorrect and does not meet the Auto Site Configuration criteria.");
-
-                            fullName = $"Nozzle{hose.RealId}_Pump{pump.Id}";
-                            assets.Add(new CreateAssetRequest
-                            {
-                                Asset_Name = fullName,
-                                Type = "Asset",
-                                Description = $"{fullName} of site {request.Fintech_SiteId}({request.FC_SiteId}) by {ApplicationConstants.JOB_NAME} Job",
-                                Site_Id_FK = request.Fintech_SiteId,
-                                AssetType = ApplicationConstants.ASSET_TYPE_NOZZLE,
-                                Created_By = ApplicationConstants.JOB_NAME
-                            });
-                        }
-                    }
-                }
-
                 var resp = await _sqlService.CreateAssets(assets);
                 return resp && await _sqlService.InsertIntoMappingTable(areaId, request.Fintech_SiteId);
             }

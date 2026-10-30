@@ -1,6 +1,6 @@
 # Auto site configuration Azure Function
 
-The .NET 10 isolated Function runs every five minutes (`0 */5 * * * *`) and uses the original auto site configuration parser and SQL logic from `FintechAutoSiteConfiguration` at commit `fe0c7e7`. `RunOnStartup=false`, `UseMonitor=true`; each invocation completes one scan.
+The .NET 10 isolated Function runs every five minutes (`0 */5 * * * *`) and is based on the original auto site configuration parser and SQL logic from `FintechAutoSiteConfiguration` at commit `fe0c7e7`. `RunOnStartup=false`, `UseMonitor=true`; each invocation completes one scan.
 
 ## Input and routing
 
@@ -18,13 +18,49 @@ Approved reconfiguration reads the newest CSV in `/ConfigurationUpdate/<FC site 
 
 The CON SFTP user needs list/read, create/write and rename/delete permissions in this container. SHA256 host-key verification is required. Do not run the original console scanner against the same files after cutover.
 
-Existing output filenames are preserved; collisions receive a unique suffix. Files changed during download or before routing are retained. A transport failure aborts the scan and is excluded from the parser's data-error cleanup, preventing a storage outage from clearing a site's SQL configuration. There is no cross-service transaction between SQL and remote routing: interruption after SQL commits can replay processing and notifications. Filenames must be immutable and producers should upload to temporary names before renaming to `.csv`.
+Existing output filenames are preserved; collisions receive a unique suffix. Files changed during download or before routing are retained. A transport failure aborts the scan and leaves input available for retry; neither storage errors nor validation errors clear a site's SQL configuration. There is no cross-service transaction between SQL and remote routing: interruption after SQL commits can replay processing and notifications. Filenames must be immutable and producers should upload to temporary names before renaming to `.csv`.
 
 Error sidecars are explicitly created with create-new semantics before subsequent
 appends. Azure SFTP rejects append-only opens for missing blobs; that previously
 aborted a scan after moving its first failed CSV to Exception and left later inputs
 pending. Each run logs the selected SQL database, and unknown/ineligible site IDs
 are reported explicitly while their inputs remain available for a future scan.
+
+## Safe reconfiguration
+
+The Function validates the proposed configuration before deleting or creating any
+assets: required grades, tanks and pumps, unique positive IDs, positive tank
+capacities, nozzle IDs, hose counts, product/grade consistency and complete tank
+and pump/nozzle mappings. Existing customer product name/ID checks remain in
+force; this does not add aliases or bypass a product mismatch. Mapping builders
+are exercised against an in-memory proposed asset set before SQL replacement.
+
+Replacement uses a single SQL connection and transaction for every delete,
+asset/area creation, mapping write and requested activation. The site row is
+locked until commit so competing replacements serialize. Any failed step or
+exception rolls back the whole replacement. Configuration cleanup is prohibited
+outside that transaction and never deletes the existing `FintechMappedCustomers`
+activation record. An already-active site's activation timestamp is retained.
+The parser's error handler records the finding and routes the CON to Exception
+with a `.txt` sidecar; it does not clear working configuration. Portal error status
+and activation are separate: an Error status does not itself deactivate a site.
+
+An approved `In Progress` update can now be processed while the site stays active.
+An unapproved CON for an active site still goes to ConfigurationUpdate. If no
+update is present yet, approval stays pending so a later file can be processed.
+Malformed filenames also cannot reuse the previous input's site identity.
+
+**Companion API limitation:** the current `FintechFuelAPI` implementation of
+`FCMappingRepository.ReconfigureSite` sets `IsActive=false` before this Function
+runs. That separate repository is unchanged. This Function preserves the
+activation state it receives and cannot restore an activation already removed by
+the API. To keep a site operational throughout the portal workflow, the API must
+queue `In Progress` without deactivating it. Deploy this Function first, then that
+API adjustment. Previously deleted configurations require a separately reviewed
+recovery; this fix does not reconstruct them or reactivate sites automatically.
+
+SQL and SFTP are not one transaction. A routing failure after SQL commit retains
+the input for retry; it cannot undo a committed replacement.
 
 ## Private Azure settings
 
@@ -109,3 +145,22 @@ Twelve offline storage regression scenarios passed, including Azure-compatible e
 The read-only SFTP check on October 19, 2026 reached the supplied account but Azure rejected it with **SSH/SFTP are not enabled for this account**. SFTP must be enabled on `fintechsftpdata` before the Function can access the CON container. Its folder contents and live end-to-end processing could not be verified through SFTP.
 
 References: [Azure SFTP connection usernames](https://learn.microsoft.com/azure/storage/blobs/secure-file-transfer-protocol-support-connect), [timer behavior](https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-timer), [isolated runtime support](https://learn.microsoft.com/en-us/azure/azure-functions/dotnet-isolated-process-guide).
+
+### Reconfiguration verification
+
+The default regression command runs 29 reconfiguration scenarios plus the 12
+storage scenarios. It covers pre-write rejection, failures at each replacement
+stage, preservation of an active site, activation of a new site, approval routing,
+malformed XML/filenames, and the parser error path. SQL and email are faked in
+these offline tests.
+
+To verify actual SQL commit/rollback without modifying application tables, opt in
+with private local settings configured:
+
+```powershell
+& "$env:USERPROFILE\.dotnet10\dotnet.exe" run --project tests\FintechAutoSiteConfiguration.RegressionTests.csproj --configuration Release -- --live-transaction-check
+```
+
+This check uses only a session-local temporary table, verifies a failed partial
+replacement restores configuration and activation, and verifies a valid update
+commits. It does not process any real CON or send email.

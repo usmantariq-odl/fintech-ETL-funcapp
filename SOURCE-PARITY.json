@@ -12,8 +12,8 @@
     {
       "path": "Services/HelperService.cs",
       "sourceSha256": "41D26E7D17A4D6A61331C290FD5E2364B9CE276CACBF24DA261EF18E676B26F7",
-      "functionSha256": "41D26E7D17A4D6A61331C290FD5E2364B9CE276CACBF24DA261EF18E676B26F7",
-      "byteIdentical": true
+      "functionSha256": "41CE86EBCE6726CC250AE752AEAB2575F610FC5E42FD510801A665B6B3A83FAE",
+      "byteIdentical": false
     },
     {
       "path": "Services/FileHelperService.cs",
@@ -48,7 +48,7 @@
     {
       "path": "Services/ParserService.cs",
       "sourceSha256": "9AB211BE4BC68C0553B609EAA0C6A5F510DB7FD57B31BAFAC3A48AE7EE676E4C",
-      "functionSha256": "77312203A9FB00BD5F137AE17E0DADDC7B5C484BC58A813FFC2C7AC123AAA78E",
+      "functionSha256": "B3A490083005D58CCAFE4531FDA71C0E46F37B7D7E1F5F47E293623D520BD38F",
       "byteIdentical": false
     },
     {
@@ -102,9 +102,15 @@
     {
       "path": "Services/SQLService.cs",
       "sourceSha256": "CC18A9DCC97A9AF289F57E97E1ECC9977728DA3658E246DB329AFD63F9891ECE",
-      "functionSha256": "CC18A9DCC97A9AF289F57E97E1ECC9977728DA3658E246DB329AFD63F9891ECE",
-      "byteIdentical": true
+      "functionSha256": "8AA2654658B9EAF86AFB2A108268266E48200B9B041868123199B5485DCA700B",
+      "byteIdentical": false
     }
   ],
-  "storageMode": "SFTP: con-files container, temporary parser downloads, remote routing"
+  "storageMode": "SFTP: con-files container, temporary parser downloads, remote routing",
+  "reconfigurationSafetyChanges": [
+    "Validate complete proposed configuration and mappings before SQL writes.",
+    "Replace assets, mappings and requested activation on one SQL connection and transaction, with rollback on failure.",
+    "Preserve existing activation records; validation/error cleanup cannot delete working configuration.",
+    "Process approved In Progress updates without requiring deactivation; companion portal API remains a separate change."
+  ]
 }

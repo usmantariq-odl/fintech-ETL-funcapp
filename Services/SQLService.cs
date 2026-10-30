@@ -6,12 +6,15 @@ using System.Text;
 public class SQLService
 {
     private readonly IOptions<ApplicationSettings> _settings;
+    private SqlConnection? configurationConnection;
+    private SqlTransaction? configurationTransaction;
+
     public SQLService(IOptions<ApplicationSettings> settings)
     {
         _settings = settings;
     }
 
-    public async Task<List<SiteAndProductResponse>> GetOmniSiteIdAndProducts(int FC_SiteId)
+    public virtual async Task<List<SiteAndProductResponse>> GetOmniSiteIdAndProducts(int FC_SiteId)
     {
         try
         {
@@ -60,7 +63,7 @@ WHERE sm.FC_SiteID = @FCSiteId";
         }
     }
 
-    public async Task<List<AssetResponse>> GetAssetsBySiteId(int Fintech_SiteId)
+    public virtual async Task<List<AssetResponse>> GetAssetsBySiteId(int Fintech_SiteId)
     {
         try
         {
@@ -84,7 +87,7 @@ WHERE sm.FC_SiteID = @FCSiteId";
     }
 
     /// <summary>
-    /// Clear site's all configuration for the given customerId and siteId, including 
+    /// Replaceable site configuration only; the activation record is preserved. Includes
     /// Assets
     /// TankMapping
     /// PumpMapping
@@ -92,16 +95,17 @@ WHERE sm.FC_SiteID = @FCSiteId";
     /// <param name="customerId"></param>
     /// <param name="siteId"></param>
     /// <returns>boolean: true/false</returns>
-    public async Task<bool> ClearSiteConfiguration(int customerId, int siteId)
+    public virtual async Task<bool> ClearSiteConfiguration(int customerId, int siteId)
     {
+        if (configurationTransaction is null)
+            throw new InvalidOperationException("Configuration can only be cleared inside an atomic replacement transaction.");
         try
         {
-            string query = $@"DELETE FROM Asset_Asset_Area_M_To_M WHERE Asset_Id_FK IN (SELECT Asset_Id FROM Assets WHERE Site_Id_FK = {siteId})
-DELETE FROM Asset_Area WHERE Site_Id_FK = {siteId}
-DELETE FROM Assets WHERE Site_Id_FK = {siteId}
-DELETE FROM Omni_Fintech_TankMapping WHERE Omni_SiteID = {siteId}
+            string query = $@"DELETE FROM Omni_Fintech_TankMapping WHERE Omni_SiteID = {siteId}
 DELETE FROM Omni_Fintech_PumpMapping WHERE Omni_SiteID = {siteId}
-DELETE FROM FintechMappedCustomers WHERE SiteId = {siteId} AND CustomerId = {customerId}";
+DELETE FROM Asset_Asset_Area_M_To_M WHERE Asset_Id_FK IN (SELECT Asset_Id FROM Assets WHERE Site_Id_FK = {siteId})
+DELETE FROM Assets WHERE Site_Id_FK = {siteId}
+DELETE FROM Asset_Area WHERE Site_Id_FK = {siteId}";
 
             return await ExecuteNonQueryAsync(query);
         }
@@ -112,19 +116,19 @@ DELETE FROM FintechMappedCustomers WHERE SiteId = {siteId} AND CustomerId = {cus
         }
     }
 
-    public async Task<int> CreateArea(int Fintech_SiteId, string Fintech_SiteName)
+    public virtual async Task<int> CreateArea(int Fintech_SiteId, string Fintech_SiteName)
     {
         try
         {
             string areaName = $"{Fintech_SiteName} Area",
                 query = $@"DECLARE @areaId INT = 0;
 SELECT @areaId = Area_Id FROM Asset_Area
-WHERE LOWER(Area_Name) = LOWER('{areaName}') AND Site_Id_FK = {Fintech_SiteId}
+WHERE LOWER(Area_Name) = LOWER('{EscapeSqlLiteral(areaName)}') AND Site_Id_FK = {Fintech_SiteId}
 
 IF @areaId <= 0
 	BEGIN
 		INSERT INTO [dbo].[Asset_Area]([Area_Name],[Description],[Site_Id_FK],[Created_By],[Created_Date])
-		VALUES('{areaName}', 'Area of site {Fintech_SiteName}({Fintech_SiteId}) by {ApplicationConstants.JOB_NAME} Job', {Fintech_SiteId}, '{ApplicationConstants.JOB_NAME}', GETDATE());
+		VALUES('{EscapeSqlLiteral(areaName)}', 'Area of site {EscapeSqlLiteral(Fintech_SiteName)}({Fintech_SiteId}) by {ApplicationConstants.JOB_NAME} Job', {Fintech_SiteId}, '{ApplicationConstants.JOB_NAME}', GETDATE());
 		SET @areaId = CAST(SCOPE_IDENTITY() AS INT);
 	END
 
@@ -142,7 +146,7 @@ SELECT @areaId [AreaId]";
         }
     }
 
-    public async Task<bool> CreateAssets(List<CreateAssetRequest> assets)
+    public virtual async Task<bool> CreateAssets(List<CreateAssetRequest> assets)
     {
         try
         {
@@ -151,7 +155,7 @@ SELECT @areaId [AreaId]";
 
             StringBuilder queryBuilder = new StringBuilder(@"INSERT INTO [dbo].[Assets]([Asset_Name],[Type],[Description],[Created_By],[Created_Date],[Site_Id_FK],[AssetType])
 VALUES");
-            queryBuilder.AppendLine(string.Join(",", assets.Select(a => $"('{a.Asset_Name}', '{a.Type}', '{a.Description}', '{a.Created_By}', GETDATE(), {a.Site_Id_FK}, '{a.AssetType}')")));
+            queryBuilder.AppendLine(string.Join(",", assets.Select(a => $"('{EscapeSqlLiteral(a.Asset_Name)}', '{EscapeSqlLiteral(a.Type)}', '{EscapeSqlLiteral(a.Description)}', '{EscapeSqlLiteral(a.Created_By)}', GETDATE(), {a.Site_Id_FK}, '{a.AssetType}')")));
 
             return await ExecuteNonQueryAsync(queryBuilder.ToString());
         }
@@ -162,7 +166,7 @@ VALUES");
         }
     }
 
-    public async Task<bool> InsertIntoMappingTable(int areaId, int fintech_SiteId)
+    public virtual async Task<bool> InsertIntoMappingTable(int areaId, int fintech_SiteId)
     {
         try
         {
@@ -182,7 +186,7 @@ WHERE Site_Id_FK = {fintech_SiteId}";
         }
     }
 
-    public async Task<bool> SaveTankMapping(List<CreateTankMappingRequest> tankMappings, int fintech_siteId)
+    public virtual async Task<bool> SaveTankMapping(List<CreateTankMappingRequest> tankMappings, int fintech_siteId)
     {
         try
         {
@@ -203,7 +207,7 @@ VALUES");
         }
     }
 
-    public async Task<bool> SavePumpMapping(List<CreatePumpMappingRequest> pumpMappings, int fintech_siteId)
+    public virtual async Task<bool> SavePumpMapping(List<CreatePumpMappingRequest> pumpMappings, int fintech_siteId)
     {
         try
         {
@@ -224,7 +228,7 @@ VALUES");
         }
     }
 
-    public async Task<bool> MarkSiteActivated(int customerId, int siteId)
+    public virtual async Task<bool> MarkSiteActivated(int customerId, int siteId)
     {
         try
         {
@@ -236,7 +240,7 @@ VALUES");
 ELSE
 	BEGIN
 		UPDATE FintechMappedCustomers
-		SET IsActive = 1, LastActivatedOn = GETDATE()
+		SET LastActivatedOn = CASE WHEN IsActive = 1 THEN LastActivatedOn ELSE GETDATE() END, IsActive = 1
 		WHERE CustomerId = {customerId} AND SiteId = {siteId}
 	END
 
@@ -257,7 +261,7 @@ IF NOT EXISTS (SELECT 1 FROM Fintech_Pointer_new WHERE Site_ID = {siteId})
         }
     }
 
-    public async Task<List<SiteMetaDataResponse>> GetSitesMetaData()
+    public virtual async Task<List<SiteMetaDataResponse>> GetSitesMetaData()
     {
         try
         {
@@ -298,53 +302,66 @@ WHERE IsConfigurationAllowed = 1 OR IsActivationAllowed = 1";
         }
     }
 
+    // Every replacement command uses this one connection/transaction. The service
+    // is scoped to a single timer scan and replacements are processed sequentially.
+    public virtual async Task ExecuteConfigurationTransactionAsync(int siteId, Func<Task> replace)
+    {
+        if (configurationConnection is not null)
+            throw new InvalidOperationException("Nested configuration replacements are not supported.");
+        await using var connection = new SqlConnection(_settings.Value.AzureSql);
+        await connection.OpenAsync();
+        await SqlConfigurationTransaction.RunAsync(connection, async transaction =>
+        {
+            configurationConnection = connection;
+            configurationTransaction = transaction;
+            try
+            {
+                // Serialize competing replacements of this site; hold the row lock
+                // until the complete assets/mappings/activation change commits.
+                var sites = await ExecuteReaderAsync("SELECT Site_Id FROM Plant_Site WITH (UPDLOCK, HOLDLOCK) WHERE Site_Id = @siteId",
+                    row => row.GetInt32(0), new SqlParameter("@siteId", siteId));
+                if (sites.Count != 1) throw new InvalidOperationException("The site no longer exists; configuration replacement was cancelled.");
+                await replace();
+            }
+            finally
+            {
+                configurationConnection = null;
+                configurationTransaction = null;
+            }
+        });
+    }
+
     public async Task<List<T>> ExecuteReaderAsync<T>(string query, Func<SqlDataReader, T> mapper, params SqlParameter[] parameters)
     {
+        var connection = configurationConnection ?? new SqlConnection(_settings.Value.AzureSql);
+        bool ownsConnection = configurationConnection is null;
         try
         {
-            var result = new List<T>();
-            await using SqlConnection connection = new(_settings.Value.AzureSql);
-            await connection.OpenAsync();
-
-            await using SqlCommand command = new(query, connection);
-
+            if (ownsConnection) await connection.OpenAsync();
+            await using var command = new SqlCommand(query, connection, configurationTransaction);
             if (parameters.Length > 0) command.Parameters.AddRange(parameters);
-
-            await using SqlDataReader reader = await command.ExecuteReaderAsync();
-
-            while (await reader.ReadAsync())
-            {
-                result.Add(mapper(reader));
-            }
-
+            await using var reader = await command.ExecuteReaderAsync();
+            var result = new List<T>();
+            while (await reader.ReadAsync()) result.Add(mapper(reader));
             return result;
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine(ex.Message);
-            throw;
-        }
+        finally { if (ownsConnection) await connection.DisposeAsync(); }
     }
 
     public async Task<bool> ExecuteNonQueryAsync(string query)
     {
+        var connection = configurationConnection ?? new SqlConnection(_settings.Value.AzureSql);
+        bool ownsConnection = configurationConnection is null;
         try
         {
-            await using SqlConnection connection = new(_settings.Value.AzureSql);
-            await connection.OpenAsync();
-
-            await using SqlCommand command = new(query, connection);
-
+            if (ownsConnection) await connection.OpenAsync();
+            await using var command = new SqlCommand(query, connection, configurationTransaction);
             return await command.ExecuteNonQueryAsync() > 0;
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine(ex.Message);
-            throw;
-        }
+        finally { if (ownsConnection) await connection.DisposeAsync(); }
     }
 
-    public async Task<bool> UpdateSiteStatus(List<SiteMetaDataResponse> sites)
+    public virtual async Task<bool> UpdateSiteStatus(List<SiteMetaDataResponse> sites)
     {
         try
         {

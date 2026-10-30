@@ -9,19 +9,21 @@ internal class ParserService
     private readonly SQLService _sqlService;
     private readonly IConfigurationFiles _files;
     private readonly FileHelperService _fileHelper;
+    private readonly Action<string, string, string> _notify;
 
-    public ParserService(SQLService sqlService, IOptions<ApplicationSettings> settings, IConfigurationFiles files, FileHelperService fileHelper)
+    public ParserService(SQLService sqlService, IOptions<ApplicationSettings> settings, IConfigurationFiles files, FileHelperService fileHelper, Action<string, string, string>? notify = null)
     {
         _sqlService = sqlService;
         _settings = settings;
         _files = files;
         _fileHelper = fileHelper;
+        _notify = notify ?? EmailService.SendEmail;
     }
 
     public async Task ProcessFilesAsync(Channel<string> channel)
     {
         List<SiteMetaDataResponse> siteMetaData = new();
-        SiteMetaDataResponse siteObj = new();
+        SiteMetaDataResponse? siteObj = null;
         try
         {
             List<int> processedList;
@@ -34,8 +36,7 @@ internal class ParserService
 
                 // Requeue the newest configuration update after the portal approves reconfiguration.
                 foreach (var site in siteMetaData.Where(site =>
-                    site.IsActive != true
-                    && site.IsConfigurationAllowed == true
+                    site.IsConfigurationAllowed == true
                     && string.Equals(site.Status, "In Progress", StringComparison.OrdinalIgnoreCase)
                     && site.FCSiteId.HasValue))
                 {
@@ -50,7 +51,7 @@ internal class ParserService
                     if (file is not null)
                         await channel.Writer.WriteAsync(file);
                     else
-                        site.Status = "File Not Landed";
+                        Console.WriteLine($"No pending configuration update for FC_SiteId {site.FCSiteId}; approval remains pending for a future input.");
                 }
 
                 foreach (var file in _files.GetFiles(_settings.Value.UnprocessedFolder, "*.csv").OrderByDescending(Path.GetFileName))
@@ -66,6 +67,9 @@ internal class ParserService
                     while (channel.Reader.TryRead(out var filePath))
                     {
                         Console.WriteLine($"Processing: {filePath}");
+                        // A malformed next file must never reuse the preceding site's state.
+                        siteObj = null;
+                        FC_SiteId = 0;
                         try
                         {
                             if (string.IsNullOrWhiteSpace(filePath))
@@ -80,7 +84,9 @@ internal class ParserService
                             }
 
                             fileNameArr = Path.GetFileName(filePath).Split('-');
-                            if (fileNameArr.Count() > 1 && !int.TryParse(fileNameArr[1].Substring(0, 6), out FC_SiteId))
+                            if (fileNameArr.Length < 2 || fileNameArr[1].Length < 6 ||
+                                !fileNameArr[1][..6].All(char.IsAsciiDigit) ||
+                                !int.TryParse(fileNameArr[1][..6], out FC_SiteId) || FC_SiteId <= 0)
                             {
                                 _fileHelper.MoveFileToException(filePath,
                                     "Invalid_FC_SITE_ID",
@@ -105,12 +111,14 @@ internal class ParserService
                                 continue;
                             }
 
-                            if (siteObj.IsActive == true)
+                            bool approvedReconfiguration = siteObj.IsConfigurationAllowed == true &&
+                                string.Equals(siteObj.Status, "In Progress", StringComparison.OrdinalIgnoreCase);
+                            if (siteObj.IsActive == true && !approvedReconfiguration)
                             {
                                 siteObj.Status = "New Configuration Detected";
                                 Console.WriteLine($"## Site changed configuration detected with FC_SiteId: {FC_SiteId} | Fintech_SiteId: {siteObj.FintechSiteId}.");
                                 _fileHelper.MoveFileToConfigurationUpdate(filePath, FC_SiteId.ToString(), _settings);
-                                EmailService.SendEmail($"{siteObj.FintechSiteName}'s Updated Configuration Detected", $"NEW CON FILE RECEIVED for the {siteObj.FintechSiteName}({siteObj.FCSiteId}) i.e. is ALREADY CONFIGURED.", _settings.Value.EmailRecipients);
+                                _notify($"{siteObj.FintechSiteName}'s Updated Configuration Detected", $"NEW CON FILE RECEIVED for the {siteObj.FintechSiteName}({siteObj.FCSiteId}) i.e. is ALREADY CONFIGURED.", _settings.Value.EmailRecipients);
                                 continue;
                             }
 
@@ -148,13 +156,15 @@ internal class ParserService
                                             Pumps = pumps,
                                             Grades = grades
                                         }
-                                    }, siteObj.IsActivationAllowed);
+                                    }, siteData, siteObj.IsActivationAllowed);
                                     if (resp)
                                     {
                                         processedList.Add(FC_SiteId);
-                                        siteObj.Status = siteObj.IsConfigurationAllowed == true && siteObj.IsActivationAllowed == true ? "Activated" : "Configured";
+                                        siteObj.Status = siteObj.IsActive == true || siteObj.IsActivationAllowed == true ? "Activated" : "Configured";
+                                        siteObj.Exception = null;
+                                        if (siteObj.IsActivationAllowed == true) siteObj.IsActive = true;
                                         _fileHelper.MoveFileToProcessed(filePath, FC_SiteId.ToString(), _settings);
-                                        EmailService.SendEmail($"{siteObj.VendorName ?? "N/A"}/{siteObj.FintechSiteName}({siteObj.FCSiteId}) {siteObj.Status} Successfully!", $"The site {siteObj.FintechSiteName} has been {siteObj.Status} successfully by {siteObj.UserEmail}.", $"{_settings.Value.EmailRecipients},{siteObj.UserEmail}");
+                                        _notify($"{siteObj.VendorName ?? "N/A"}/{siteObj.FintechSiteName}({siteObj.FCSiteId}) {siteObj.Status} Successfully!", $"The site {siteObj.FintechSiteName} has been {siteObj.Status} successfully by {siteObj.UserEmail}.", $"{_settings.Value.EmailRecipients},{siteObj.UserEmail}");
                                     }
                                     else
                                     {
@@ -178,8 +188,9 @@ internal class ParserService
                             {
                                 siteObj.Status = "Error";
                                 siteObj.Exception = ex.Message;
-                                await _sqlService.ClearSiteConfiguration(siteObj.FintechCustomerId ?? 0, siteObj.FintechSiteId ?? 0);
-                                EmailService.SendEmail($"Error while processing {siteObj.FintechSiteName}!", ex.Message, _settings.Value.EmailRecipients);
+                                // Validation never mutates SQL; failed replacement rolls back.
+                                // Keep the current activation and working configuration intact.
+                                _notify($"Error while processing {siteObj.FintechSiteName}!", ex.Message, _settings.Value.EmailRecipients);
                             }
                             _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, ex);
                         }
@@ -235,37 +246,9 @@ Description:
         }
     }
 
-    private async Task<bool> ParseData(ParseDataRequest request, bool? isActivationAllowed)
+    private async Task<bool> ParseData(ParseDataRequest request, List<SiteAndProductResponse> products, bool? isActivationAllowed)
     {
-        try
-        {
-            Console.WriteLine($"Parsing file: {request.filePath}");
-            List<CreateAssetRequest> assets = new();
-
-            var assetsCount = await _sqlService.GetAssetsCountBySiteId(request.Fintech_SiteId);
-            if (assetsCount > 0)
-                await _sqlService.ClearSiteConfiguration(request.Fintech_CustomerId, request.Fintech_SiteId);
-
-            bool resp = await HelperService.CreateSiteAssets(request, _sqlService);
-            if (resp)
-            {
-                var assetEntities = await _sqlService.GetAssetsBySiteId(request.Fintech_SiteId);
-                if (assetEntities.Any())
-                {
-                    var configResp = await _sqlService.SaveTankMapping(HelperService.GetTankMappingRequestModels(request, assetEntities), request.Fintech_SiteId) &&
-                              await _sqlService.SavePumpMapping(HelperService.GetPumpMappingRequestModels(request, assetEntities), request.Fintech_SiteId);
-
-                    if (configResp && isActivationAllowed == true) return await _sqlService.MarkSiteActivated(request.Fintech_CustomerId, request.Fintech_SiteId);
-                    else return configResp;
-                }
-            }
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine(ex.Message);
-            throw;
-        }
+        await new SiteConfigurationWriter(_sqlService).ReplaceAsync(request, products, isActivationAllowed);
+        return true;
     }
 }

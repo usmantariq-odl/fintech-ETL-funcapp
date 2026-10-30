@@ -2,11 +2,19 @@ using System.Text;
 using FintechAutoSiteConfiguration.FunctionApp.Storage;
 using Microsoft.Extensions.Options;
 
+if (args.Contains("--live-transaction-check"))
+{
+    await LiveTransactionCheck.RunAsync();
+    return;
+}
+
 if (args.Contains("--live-sidecar-check"))
 {
     LiveSidecarCheck.Run();
     return;
 }
+
+await ReconfigurationChecks.RunAsync();
 
 var scenarios = new (string Name, Action Test)[]
 {
