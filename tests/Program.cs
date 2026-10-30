@@ -2,8 +2,29 @@ using System.Text;
 using FintechAutoSiteConfiguration.FunctionApp.Storage;
 using Microsoft.Extensions.Options;
 
+if (args.Contains("--live-sidecar-check"))
+{
+    LiveSidecarCheck.Run();
+    return;
+}
+
 var scenarios = new (string Name, Action Test)[]
 {
+    ("Azure-style append creates missing error sidecars and retains previous diagnostics", () =>
+    {
+        byte[]? content = null;
+        Stream Open(string path, FileMode mode)
+        {
+            if (mode == FileMode.Append && content is null) throw new FileNotFoundException("Azure append requires an existing blob.");
+            if (mode == FileMode.CreateNew && content is not null) throw new IOException("An existing log must not be overwritten.");
+            var stream = new PersistedStream(bytes => content = bytes);
+            if (content is not null) stream.Write(content);
+            return stream;
+        }
+        SftpRemoteFiles.AppendText("/Exception/2008/CON.txt", "first error\n", _ => content is not null, Open);
+        SftpRemoteFiles.AppendText("/Exception/2008/CON.txt", "second error\n", _ => content is not null, Open);
+        Check(Encoding.UTF8.GetString(content!) == "first error\nsecond error\n", "Diagnostics were missing, overwritten, or contained a BOM.");
+    }),
     ("CSV discovery excludes directories and partial uploads", () =>
     {
         var remote = new FakeRemote();
@@ -132,6 +153,15 @@ static IOptions<ApplicationSettings> Settings() => Options.Create(new Applicatio
     UnprocessedFolder = "/Unprocessed", ProcessedFolder = "/Processed", ExceptionFolder = "/Exception",
     DuplicateFolder = "/Duplicate", ConfigurationUpdateFolder = "/ConfigurationUpdate", DiscardedFolder = "/Discarded"
 });
+
+sealed class PersistedStream(Action<byte[]> persist) : MemoryStream
+{
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) persist(ToArray());
+        base.Dispose(disposing);
+    }
+}
 
 sealed class FakeRemote : IRemoteFiles
 {

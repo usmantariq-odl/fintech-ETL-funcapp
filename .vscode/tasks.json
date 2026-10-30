@@ -4,18 +4,9 @@
     {
       "label": "publish (functions)",
       "type": "process",
-      "command": "C:/Users/usmtariq/.dotnet10/dotnet.exe",
-      "args": [
-        "publish",
-        "${workspaceFolder}/FintechEtl.FunctionApp.csproj",
-        "--configuration",
-        "Release",
-        "--output",
-        "${workspaceFolder}/bin/Release/net10.0/publish"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/scripts/publish.ps1"],
+      "options": { "cwd": "${workspaceFolder}" },
       "problemMatcher": "$msCompile"
     }
   ]

@@ -99,7 +99,11 @@ internal class ParserService
 
                             Console.WriteLine($"Checking Site's Data for FC_SiteId: {FC_SiteId}");
                             siteObj = siteMetaData.Find(x => x.FCSiteId == FC_SiteId);
-                            if (siteObj is null) continue;
+                            if (siteObj is null)
+                            {
+                                Console.WriteLine($"FC_SiteId {FC_SiteId} has no eligible site mapping in this Function's SQL database; input retained. Check the target database and configuration/activation permissions.");
+                                continue;
+                            }
 
                             if (siteObj.IsActive == true)
                             {

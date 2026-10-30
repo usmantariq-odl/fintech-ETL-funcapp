@@ -47,7 +47,17 @@ public sealed class SftpRemoteFiles : IRemoteFiles
     public void Rename(string source, string destination) => Connected().RenameFile(source, destination);
     public void AppendAllText(string path, string text)
     {
-        using var stream = Connected().Open(path, FileMode.Append, FileAccess.Write);
+        var connection = Connected();
+        AppendText(path, text, connection.Exists,
+            (name, mode) => connection.Open(name, mode, FileAccess.Write));
+    }
+
+    internal static void AppendText(string path, string text,
+        Func<string, bool> exists, Func<string, FileMode, Stream> open)
+    {
+        // Azure SFTP append opens an existing blob; it does not create a missing
+        // error sidecar. Create explicitly, without overwriting an existing log.
+        using var stream = open(path, exists(path) ? FileMode.Append : FileMode.CreateNew);
         using var writer = new StreamWriter(stream, new UTF8Encoding(false));
         writer.Write(text);
     }

@@ -20,9 +20,32 @@ The CON SFTP user needs list/read, create/write and rename/delete permissions in
 
 Existing output filenames are preserved; collisions receive a unique suffix. Files changed during download or before routing are retained. A transport failure aborts the scan and is excluded from the parser's data-error cleanup, preventing a storage outage from clearing a site's SQL configuration. There is no cross-service transaction between SQL and remote routing: interruption after SQL commits can replay processing and notifications. Filenames must be immutable and producers should upload to temporary names before renaming to `.csv`.
 
+Error sidecars are explicitly created with create-new semantics before subsequent
+appends. Azure SFTP rejects append-only opens for missing blobs; that previously
+aborted a scan after moving its first failed CSV to Exception and left later inputs
+pending. Each run logs the selected SQL database, and unknown/ineligible site IDs
+are reported explicitly while their inputs remain available for a future scan.
+
 ## Private Azure settings
 
-`azure-app-settings.local.json` contains the selected real settings in Azure Portal Advanced edit format: an array of `name`, `value`, `slotSetting` entries. It is Git-ignored and excluded from build output, publish output and the ZIP. Paste its contents into the new Function App's environment variables. It includes the supplied host storage/monitoring settings, CON SFTP credentials, the `FintechStagDB` SQL connection, remote folder paths, and the existing main application's email settings. Credentials are not included in this README or the example templates.
+The auto-site Function and main ETL are separate applications: changing the main
+ETL's database setting does not update this Function. Set
+`ApplicationSettings__AzureSql` to the same intended database as the main ETL's
+`FintechSqlConnectionString`. The database supplies site identity, configuration
+permission and activation state; the same FC site ID can have different mappings
+and flags in another database.
+
+On October 30, 2026, the deployed `Fintech-Stag-AutoSiteConfig` connection was
+corrected from `FintechStagDB` to `FintechStagDB_NewArchitecture`, matching the main
+ETL and the portal's site data. The old database marked FC site `333446` active
+(Omni site `1005`), causing the expected active-site ConfigurationUpdate route,
+and did not contain FC site `2008`, leaving its inputs pending. In the intended
+database those sites map to `1180` and `1181`, respectively, with configuration
+allowed and activation disabled. No parser routing changes are required for that
+database mismatch. Activation flags must continue to come from the intended
+database, rather than being overridden to make a file process.
+
+`azure-app-settings.local.json` contains the selected real settings in Azure Portal Advanced edit format: an array of `name`, `value`, `slotSetting` entries. It is Git-ignored and excluded from build output, publish output and the ZIP. Paste its contents into the new Function App's environment variables. It includes the supplied host storage/monitoring settings, CON SFTP credentials, the target SQL connection, remote folder paths, and the existing main application's email settings. Credentials are not included in this README or the example templates.
 
 The original `FintechSqlConnectionString` value is mapped to `ApplicationSettings__AzureSql`, which the original SQL service uses. `SftpUsername`, `EtlDryRun`, `EtlWorkerCount` and `ConSftpDestinations` are omitted: they belong to the ETL application. `PollingIntervalInMinutes` is unnecessary because the Function timer controls scheduling.
 
@@ -81,7 +104,7 @@ No Azure resources were changed or deployed during preparation.
 
 The replacement entry point and timer wire scoped services. New `Storage` files implement the SFTP adapter. Application dependency versions are retained; the transitive PKCS package is pinned to patched `9.0.21`. Nine nullable-reference compiler warnings originate in the copied code.
 
-Eleven offline storage regression scenarios passed, including all output routes, approved requeueing, collisions, unstable input, transport failures, lost acknowledgements, traversal rejection and temporary cleanup. Build/publish, source parity and ZIP exclusion checks are recorded in `artifacts/verification.json`. No live SQL processing, email delivery or remote file writes were performed.
+Twelve offline storage regression scenarios passed, including Azure-compatible error-log creation/appending, all output routes, approved requeueing, collisions, unstable input, transport failures, lost acknowledgements, traversal rejection and temporary cleanup. Build/publish, source parity and ZIP exclusion checks are recorded in `artifacts/verification.json`. No live SQL processing, email delivery or remote file writes were performed.
 
 The read-only SFTP check on October 19, 2026 reached the supplied account but Azure rejected it with **SSH/SFTP are not enabled for this account**. SFTP must be enabled on `fintechsftpdata` before the Function can access the CON container. Its folder contents and live end-to-end processing could not be verified through SFTP.
 

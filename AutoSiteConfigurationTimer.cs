@@ -22,6 +22,8 @@ public sealed class AutoSiteConfigurationTimer(
 
         using var scope = scopeFactory.CreateScope();
         var settings = scope.ServiceProvider.GetRequiredService<IOptions<ApplicationSettings>>().Value;
+        logger.LogInformation("Auto-site configuration SQL database: {Database}",
+            new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(settings.AzureSql).InitialCatalog);
         var files = scope.ServiceProvider.GetRequiredService<IConfigurationFiles>();
         if (!files.DirectoryExists(settings.UnprocessedFolder))
             throw new DirectoryNotFoundException(
