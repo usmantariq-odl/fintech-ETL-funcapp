@@ -154,6 +154,7 @@ namespace CSVReader
 
         public int EnsureProcessedFileRecord(string filePath, string fileType, string remotePath = null)
         {
+            ValidateArchiveRecord(filePath, fileType, remotePath);
             string fullPath = Path.GetFullPath(filePath);
             var key = remotePath == null ? (Path.GetDirectoryName(fullPath) ?? string.Empty, Path.GetFileName(fullPath)) : RemoteFileKey(remotePath);
             string directoryPath = key.Item1;
@@ -217,6 +218,13 @@ namespace CSVReader
                     return Convert.ToInt32(insertCmd.ExecuteScalar());
                 }
             }
+        }
+
+        internal static void ValidateArchiveRecord(string filePath, string fileType, string remotePath)
+        {
+            if (!ArchiveFiles.IsSupported(filePath) || remotePath?.Contains("!/") == true
+                || !string.Equals(ArchiveFiles.Extension(filePath).TrimStart('.'), fileType, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Fintech_ProcessedFiles accepts archive records only; CSV and regeneration checkpoints use Fintech_EtlFileCheckpoints.");
         }
 
         public void UpdateProcessedFileStatus(int processedFileId, string status, string errorMessage = null)

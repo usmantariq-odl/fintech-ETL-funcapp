@@ -12,3 +12,4 @@ fixed-worker-scan.log
 full-inventory.log
 publish/
 fintech-etl-net10.zip
+/artifacts

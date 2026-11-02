@@ -7,7 +7,7 @@ internal static class SqlSchemaVerifier
 {
     public static void Verify(string connectionString)
     {
-        string[] tables = ["Fintech_ProcessedFiles", "Fintech_Transactions", "Fintech_transactionsType", "Fintech_TankLevels",
+        string[] tables = ["Fintech_ProcessedFiles", "Fintech_EtlFileCheckpoints", "Fintech_Transactions", "Fintech_transactionsType", "Fintech_TankLevels",
             "Fintech_TankDelivery", "Fintech_Alarms", "FintechMappedCustomers", "Omni_Fintech_SiteMapping", "Omni_Fintech_TankMapping",
             "Omni_Fintech_PumpMapping", "Plant_Site", "Omni_Fintech_Products", "PriceWritebackRequests", "PriceWritebackStatusHistory"];
         string[] procedures = ["InsertintoFintechTransactions", "InsertintoFintechTransactionsType", "InsertintoFintechTankLevels",
@@ -29,6 +29,12 @@ internal static class SqlSchemaVerifier
             using var command = new SqlCommand("SELECT COL_LENGTH('Fintech_ProcessedFiles', @Column)", connection);
             command.Parameters.Add("@Column", SqlDbType.NVarChar, 128).Value = column;
             if (command.ExecuteScalar() is DBNull) missing.Add("Fintech_ProcessedFiles." + column);
+        }
+        foreach (var column in new[] { "KeyHash", "RemoteKey", "Status", "ErrorMessage", "UpdatedOn" })
+        {
+            using var command = new SqlCommand("SELECT COL_LENGTH('dbo.Fintech_EtlFileCheckpoints', @Column)", connection);
+            command.Parameters.Add("@Column", SqlDbType.NVarChar, 128).Value = column;
+            if (command.ExecuteScalar() is DBNull) missing.Add("Fintech_EtlFileCheckpoints." + column);
         }
         if (missing.Count > 0) throw new InvalidOperationException("Required SQL objects/columns are missing: " + string.Join(", ", missing));
         Console.WriteLine($"Required SQL objects present: {tables.Length} tables, {procedures.Length} procedures, file-tracking columns. No writes performed.");

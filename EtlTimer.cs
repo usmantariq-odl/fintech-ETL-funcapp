@@ -23,7 +23,11 @@ public sealed class EtlTimer
     {
         LastRunFailed = 0;
         var settings = EtlSettings.Load();
-        if (!settings.DryRun) SqlSchemaVerifier.Verify(settings.SqlConnectionString);
+        if (!settings.DryRun)
+        {
+            SqlFileCheckpoints.EnsureCreated(settings.SqlConnectionString);
+            SqlSchemaVerifier.Verify(settings.SqlConnectionString);
+        }
         logger.LogInformation("Scanning Azure SFTP with {Workers} ETL workers; SQL database: {Database}; dry run: {DryRun}",
             settings.WorkerCount, settings.SqlDatabase, settings.DryRun);
 

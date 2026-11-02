@@ -17,8 +17,10 @@ internal interface IEtlBackend
     string Status(string key);
     int EnsureRecord(string local, string type, string key);
     void SetStatus(int id, string status, string error = null);
+    string CheckpointStatus(string key);
+    void SetCheckpoint(string key, string status, string error = null);
     void ValidateCsv(string file, string site);
-    void ProcessCsv(string file, string site, int id);
+    void ProcessCsv(string file, string site, int? id);
     void Regenerate(string site, DateTime timestamp);
 }
 
@@ -67,11 +69,10 @@ public sealed class FtpConnectivity
             {
                 isExceptionOccured = isFileRegrenerated = false;
                 var key = remote + "!/" + Path.GetRelativePath(root, file).Replace('\\', '/');
-                var previous = backend.Status(key);
+                var previous = backend.CheckpointStatus(key);
                 if (previous == "Processed") { succeeded.Add(file); continue; }
                 // A final parent may only be waiting for its SFTP archive operations.
                 if ((parentStatus is "Partial" or "Failed") && previous == "Failed") { failed.Add(file); continue; }
-                var id = backend.EnsureRecord(file, "CSV", key);
                 try
                 {
                     using (var transaction = EtlTransaction.Begin())
@@ -88,14 +89,14 @@ public sealed class FtpConnectivity
                             backend.ProcessCsv(scratch, site, parentId);
                         }
                         if (isExceptionOccured) throw new InvalidDataException($"CSV processing failed for {Path.GetFileName(file)}.");
-                        backend.SetStatus(id, "Processed");
+                        backend.SetCheckpoint(key, "Processed");
                         transaction.Complete();
                     }
                     succeeded.Add(file);
                 }
                 catch (Exception ex) when (!IsRetryable(ex))
                 {
-                    backend.SetStatus(id, "Failed", ex.Message);
+                    backend.SetCheckpoint(key, "Failed", ex.Message);
                     failed.Add(file);
                     log.Error($"CSV failed: {Path.GetFileName(file)}", ex);
                 }
@@ -104,12 +105,11 @@ public sealed class FtpConnectivity
             if (regenerated && failed.Count == 0)
             {
                 var key = remote + "!/hourly-regeneration";
-                if (backend.Status(key) != "Processed")
+                if (backend.CheckpointStatus(key) != "Processed")
                 {
-                    var id = backend.EnsureRecord(local, "Regeneration", key);
                     using var transaction = EtlTransaction.Begin();
                     backend.Regenerate(site, timestamp);
-                    backend.SetStatus(id, "Processed");
+                    backend.SetCheckpoint(key, "Processed");
                     transaction.Complete();
                 }
             }
@@ -149,21 +149,20 @@ public sealed class FtpConnectivity
     {
         isExceptionOccured = isFileRegrenerated = false;
         if (!backend.IsConfigured(site)) return new(EtlResult.NotConfigured, [new(local, "MagLinkNotConfigured")]);
-        if (backend.Status(remote) != "Processed")
+        if (backend.CheckpointStatus(remote) != "Processed")
         {
-            var id = backend.EnsureRecord(local, "MagLink", remote);
             try
             {
                 using var transaction = EtlTransaction.Begin();
                 backend.ValidateCsv(local, site);
-                backend.ProcessCsv(local, site, id);
+                backend.ProcessCsv(local, site, null);
                 if (isExceptionOccured) throw new InvalidDataException("MagLink CSV processing failed.");
-                backend.SetStatus(id, "Processed");
+                backend.SetCheckpoint(remote, "Processed");
                 transaction.Complete();
             }
             catch (Exception ex)
             {
-                backend.SetStatus(id, IsRetryable(ex) ? "Retry" : "Failed", ex.Message);
+                backend.SetCheckpoint(remote, IsRetryable(ex) ? "Retry" : "Failed", ex.Message);
                 throw;
             }
         }
@@ -191,6 +190,9 @@ internal sealed class LegacyEtlBackend(ILog log) : IEtlBackend
     public string Status(string key) => dal.GetProcessedFileStatus(key);
     public int EnsureRecord(string local, string type, string key) => dal.EnsureProcessedFileRecord(local, type, key);
     public void SetStatus(int id, string status, string error = null) => dal.UpdateProcessedFileStatus(id, status, error);
+    public string CheckpointStatus(string key) => new SqlFileCheckpoints(DAL.connectToDb).Status(key)
+        ?? dal.GetProcessedFileStatus(key); // Read historical child rows; never insert/update them.
+    public void SetCheckpoint(string key, string status, string error = null) => new SqlFileCheckpoints(DAL.connectToDb).SetStatus(key, status, error);
     public void Regenerate(string site, DateTime timestamp)
     {
         FtpConnectivity.isExceptionOccured = false;
@@ -232,7 +234,7 @@ internal sealed class LegacyEtlBackend(ILog log) : IEtlBackend
         }
         if (count == 0) throw new InvalidDataException("CSV has no data rows.");
     }
-    public void ProcessCsv(string file, string site, int id)
+    public void ProcessCsv(string file, string site, int? id)
     {
         if (ArchiveFiles.IsMagLink(file))
         {

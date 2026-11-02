@@ -7,6 +7,7 @@
     <Nullable>disable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="deployment/Create-EtlFileCheckpoints.sql" />
     <Compile Remove="tests/**/*.cs" />
     <InternalsVisibleTo Include="FintechEtl.RegressionTests" />
     <None Update="local.settings.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
