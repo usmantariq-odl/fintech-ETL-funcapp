@@ -6,6 +6,8 @@ public sealed class SftpConfigurationFiles(IRemoteFiles remote) : IConfiguration
     private readonly string workDirectory = Path.Combine(Path.GetTempPath(), "FintechAutoSiteConfiguration", Guid.NewGuid().ToString("N"));
     private readonly Dictionary<string, RemoteFile> downloads = new(StringComparer.Ordinal);
 
+    public string DescribeSource(string localPath) => downloads.TryGetValue(localPath, out var file) ? file.FullName : localPath;
+
     public bool DirectoryExists(string path) => Storage(() =>
     {
         var remotePath = SftpConnectionSettings.NormalizeRemotePath(path);

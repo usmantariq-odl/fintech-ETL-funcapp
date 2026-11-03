@@ -164,3 +164,35 @@ with private local settings configured:
 This check uses only a session-local temporary table, verifies a failed partial
 replacement restores configuration and activation, and verifies a valid update
 commits. It does not process any real CON or send email.
+
+
+## Immediate AutoSite error emails
+
+AutoSite error notifications use the same professional HTML layout as the ETL error emails, with a plain-text alternative. Each error event is queued immediately for its own email, without a digest or cooldown. Two persistence workers and two ACS senders run in the background. An error email includes the original remote CON path, FC site ID (including filename leading zeros), UTC/PKT occurrence time, invocation ID, SQL database, SFTP host, disposition and redacted diagnostic details. Available exception details include validation findings and stack/inner exceptions.
+
+Covered cases:
+
+- Invalid CON filename/site ID moved to `Exception/Invalid_FC_SITE_ID`.
+- Malformed CON XML, mandatory-field/product/tank/pump/nozzle validation rejection, or configuration replacement/rollback failure moved to `Exception/<site>`.
+- No eligible site metadata/mapping: input is retained and an individual warning email is sent for each attempt. AutoSite has no `notconfigured` route or site-folder suppression rule.
+- Unexpected false replacement/status-update result.
+- SQL, SFTP, input-discovery, exception-sidecar/publication and timer invocation failures. Fatal storage failures carry the current remote input/site to the invocation-level notification so they are reported once, rather than also sending the legacy error email.
+
+Existing success and `ConfigurationUpdate` approval notifications retain their current behavior and recipient settings. Approved reconfiguration validation/transaction/rollback behavior and the five-minute timer schedule are unchanged.
+
+Configure these four environment settings on the **AutoSite Function App**:
+
+| Setting | Value |
+|---|---|
+| `ACS_EMAIL_CONNECTION_STRING` | Full ACS connection string; secret / Key Vault reference |
+| `EMAIL_FROM` | `fintechfuel@octopusdtl.com` |
+| `EMAIL_RECIPIENTS` | `kamran.khalid@octopusdtl.com,khurram.mir@octopusdtl.com,ujaved@avanceon.ae,usman.tariq@octopusdtl.com,ameer.hamza@octopusdtl.com` |
+| `AutoSiteErrorEmailEnabled` | `true`; use `false` to disable only these error alerts |
+
+For compatibility, missing standard ACS/sender/recipient settings fall back to existing `AutoSiteEmailConnectionString`, `AutoSiteEmailSender`, and `ApplicationSettings__EmailRecipients`. The ignored **autosite-email-app-settings.local.json** contains only the four alert settings, populated locally; merge those into the existing Azure environment rather than replacing unrelated settings. All `*.local.json` files are excluded from Git and deployment. No credential is embedded in code or packages.
+
+Pending alerts use individual private blobs under `fintech-autosite-alerts/<app-and-slot-hash>/events/` in **AzureWebJobsStorage** (account-key connection string with create/write/lease permissions required). This is separate from the CON/data containers and does not change the SQL schema. After ACS acceptance the event blob is deleted. Failed sends remain for startup/one-minute recovery; a finite per-event lease prevents simultaneous delivery. The ingress queue is bounded to 1,024 events with backpressure during very large error storms. Ready references are bounded to 256; overflow stays durable for discovery. Full diagnostic logs remain in the Function and existing exception sidecars; each email event is limited to 6,000 diagnostic characters.
+
+Storage persistence retries three times, then logs the failure explicitly. If the host dies before persistence, or storage stays unavailable, the email cannot be guaranteed. Shutdown persists queued events and allows 30 seconds to drain senders; pending stored events resume on a later invocation. Delivery is at least once: a timeout/crash between ACS acceptance and deletion can repeat an email. ACS `Succeeded` means accepted for delivery; network, backlog and ACS throughput affect actual arrival. A stopped host or startup validation failure before invocation requires a separate Azure Monitor availability alert.
+
+Build then run the application DLL with `--preview-error-email` to write `artifacts/autosite-error-email/Example-Email.html`. `--test-error-email` sends a synthetic template test only to **usman.tariq@octopusdtl.com**; neither command reads SQL or processes CON files. The regression suite covers parser error routing, preserved activation/rollback, remote path context, duplicate-error suppression and credential-safe HTML. `--email-outbox-check` on the regression test project uses a private temporary Blob scope to test immediate individual sending and recovery with simulated send callbacks; no mail or business data writes occur, and its test blobs are removed.

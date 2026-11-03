@@ -12,3 +12,5 @@ appsettings*.json
 README.md
 SOURCE-PARITY.json
 *.log
+
+*.local.json

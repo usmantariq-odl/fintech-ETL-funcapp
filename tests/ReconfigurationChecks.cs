@@ -116,14 +116,56 @@ internal static class ReconfigurationChecks
             var sql = new FakeConfigurationSql(); await Process(sql, remote);
             Check(sql.Committed && sql.Clears == 1 && sql.Active && sql.Site.Status == "Activated", "Malformed next input reused the previous site.");
         });
+        await Test("Validation rejection sends one structured error with the original remote path and no legacy duplicate", async () =>
+        {
+            var remote = new FakeRemote(); var source = "/Unprocessed/CON-60000520261030120000.csv"; remote.Put(source, "<ROOT><bad>");
+            var events = new List<(string Category, string? Site, string? File, string Detail)>(); int legacy = 0;
+            await Process(new FakeConfigurationSql(), remote,
+                (category, site, file, disposition, detail) => events.Add((category, site, file, detail)), (_, _, _) => legacy++);
+            Check(events.Count == 1 && events[0].Category == "ConfigurationRejectedOrFailed" && events[0].File == source && events[0].Site == "600005" && events[0].Detail.Contains("Exception"), "Error lacks original CON path or actual exception, or was duplicated.");
+            Check(legacy == 0 && remote.Exists("/Exception/600005/CON-60000520261030120000.csv"), "Legacy error email was duplicated or exception routing failed.");
+        });
+        await Test("Invalid CON filename triggers a structured exception-route alert", async () =>
+        {
+            var remote = new FakeRemote(); remote.Put("/Unprocessed/BAD.csv", "invalid");
+            var events = new List<string>();
+            await Process(new FakeConfigurationSql(), remote, (category, site, file, disposition, detail) => events.Add(category));
+            Check(events.SequenceEqual(new[] { "InvalidFilename" }), "Invalid filename did not produce exactly one error event.");
+        });
+        await Test("Missing site mapping alerts and retains input without configuration writes", async () =>
+        {
+            var remote = new FakeRemote(); var source = "/Unprocessed/CON-60000520261030120000.csv"; remote.Put(source, "unused");
+            var sql = new FakeConfigurationSql(); sql.Site.FCSiteId = 600006; var events = new List<string>();
+            await Process(sql, remote, (category, site, file, disposition, detail) => events.Add(category));
+            Check(events.SequenceEqual(new[] { "MissingSiteMapping" }) && remote.Exists(source) && sql.Clears == 0, "Missing mapping did not alert or consumed its input.");
+        });
+        await Test("Storage failure carries source and site to the single invocation alert boundary", async () =>
+        {
+            var remote = new FakeRemote { FailRename = true }; var source = "/Unprocessed/CON-60000520261030120000.csv"; remote.Put(source, Request().document.ToString());
+            int localAlerts = 0;
+            try { await Process(new FakeConfigurationSql(), remote, (_, _, _, _, _) => localAlerts++); throw new Exception("Storage failure was swallowed."); }
+            catch (ConfigurationStorageException ex)
+            {
+                Check((string?)ex.Data["AutoSiteFile"] == source && (string?)ex.Data["AutoSiteSite"] == "600005" && localAlerts == 0,
+                    "Invocation error lost the original source context or emitted a duplicate local alert.");
+            }
+        });
+        await Test("Replacement rollback emits its actual diagnostic without changing activation", async () =>
+        {
+            var remote = new FakeRemote(); remote.Put("/Unprocessed/CON-60000520261030120000.csv", Request().document.ToString());
+            var sql = new FakeConfigurationSql { FailAt = "pumpMapping" }; var details = new List<string>();
+            await Process(sql, remote, (category, site, file, disposition, detail) => details.Add(detail));
+            Check(details.Count == 1 && details[0].Contains("rolled back") && sql.RolledBack && sql.Active, "Rollback error email is missing or working activation changed.");
+        });
         Console.WriteLine($"{count} reconfiguration regression scenarios passed.");
     }
 
-    static async Task Process(FakeConfigurationSql sql, FakeRemote remote)
+    static async Task Process(FakeConfigurationSql sql, FakeRemote remote,
+        Action<string, string?, string?, string, string>? report = null, Action<string, string, string>? legacy = null)
     {
         using var files = new SftpConfigurationFiles(remote);
         var settings = Options.Create(new ApplicationSettings { UnprocessedFolder = "/Unprocessed", ProcessedFolder = "/Processed", ExceptionFolder = "/Exception", DuplicateFolder = "/Duplicate", ConfigurationUpdateFolder = "/ConfigurationUpdate", DiscardedFolder = "/Discarded", EmailRecipients = "nobody@example.invalid" });
-        await new ParserService(sql, settings, files, new FileHelperService(files), (_, _, _) => { }).ProcessFilesAsync(Channel.CreateUnbounded<string>());
+        await new ParserService(sql, settings, files, new FileHelperService(files), legacy ?? ((_, _, _) => { })).ProcessFilesAsync(Channel.CreateUnbounded<string>(), report);
     }
     static async Task Reject(Func<Task> action)
     {

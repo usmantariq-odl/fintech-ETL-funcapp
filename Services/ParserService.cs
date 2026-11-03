@@ -20,8 +20,15 @@ internal class ParserService
         _notify = notify ?? EmailService.SendEmail;
     }
 
-    public async Task ProcessFilesAsync(Channel<string> channel)
+    public async Task ProcessFilesAsync(Channel<string> channel,
+        Action<string, string?, string?, string, string>? reportError = null)
     {
+        string? activeFile = null, activeSite = null;
+        void Error(string category, string? site, string? file, string disposition, string details)
+        {
+            if (reportError is not null) reportError(category, site, file, disposition, details);
+            else _notify($"AutoSite {category}: site {site ?? "N/A"}", $"Input: {file}\n{disposition}\n{details}", _settings.Value.EmailRecipients);
+        }
         List<SiteMetaDataResponse> siteMetaData = new();
         SiteMetaDataResponse? siteObj = null;
         try
@@ -70,6 +77,8 @@ internal class ParserService
                         // A malformed next file must never reuse the preceding site's state.
                         siteObj = null;
                         FC_SiteId = 0;
+                        activeFile = _files.DescribeSource(filePath);
+                        activeSite = null;
                         try
                         {
                             if (string.IsNullOrWhiteSpace(filePath))
@@ -92,10 +101,13 @@ internal class ParserService
                                     "Invalid_FC_SITE_ID",
                                     _settings,
                                     $"Invalid FC_SiteId found or unable to extract FC_SiteId from first six digits from file: {Path.GetFileName(filePath)}");
+                                Error("InvalidFilename", null, activeFile, "Moved to " + _settings.Value.ExceptionFolder + "/Invalid_FC_SITE_ID/",
+                                    "Unable to extract a positive FC site ID from the first six digits after CON- in the filename.");
                                 Console.WriteLine($"Invalid FC_SiteId captured. {Path.GetFileName(filePath)}");
                                 continue;
                             }
 
+                            activeSite = fileNameArr[1][..6];
                             if (processedList.Contains(FC_SiteId))
                             {
                                 Console.WriteLine($"Discarding file for FC_SiteId: {FC_SiteId} as it's already been processed.");
@@ -108,6 +120,8 @@ internal class ParserService
                             if (siteObj is null)
                             {
                                 Console.WriteLine($"FC_SiteId {FC_SiteId} has no eligible site mapping in this Function's SQL database; input retained. Check the target database and configuration/activation permissions.");
+                                Error("MissingSiteMapping", activeSite, activeFile, "Input retained for a later scan; not moved to a notconfigured folder",
+                                    "No eligible site metadata was returned for this FC site ID in the configured AutoSite database. Check the target database, FC-to-Omni site mapping and configuration/activation eligibility.");
                                 continue;
                             }
 
@@ -171,6 +185,7 @@ internal class ParserService
                                         siteObj.Status = "Error";
                                         siteObj.Exception = $"Error processing file: {filePath}";
                                         _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, $"Error processing file: {filePath}");
+                                        Error("ConfigurationFailed", activeSite, activeFile, "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/", "Configuration replacement reported failure. Inspect transaction and mapping diagnostics before retry.");
                                     }
                                 }
                                 else
@@ -190,9 +205,15 @@ internal class ParserService
                                 siteObj.Exception = ex.Message;
                                 // Validation never mutates SQL; failed replacement rolls back.
                                 // Keep the current activation and working configuration intact.
-                                _notify($"Error while processing {siteObj.FintechSiteName}!", ex.Message, _settings.Value.EmailRecipients);
+
                             }
-                            _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, ex);
+                            try { _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, ex); }
+                            catch (Exception storageError)
+                            {
+                                throw new ConfigurationStorageException("Configuration failed and exception-file publication also failed. Verify actual file location and committed configuration.", new AggregateException(ex, storageError));
+                            }
+                            Error("ConfigurationRejectedOrFailed", activeSite, activeFile,
+                                "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/; validation runs before replacement, and failed replacements use transaction rollback. Verify actual activation state.", ex.ToString());
                         }
                     }
                 }
@@ -200,14 +221,20 @@ internal class ParserService
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
 
+                activeFile = activeSite = null;
                 Console.WriteLine($"Updating sites statuses");
-                await _sqlService.UpdateSiteStatus(siteMetaData);
+                var statusesSaved = await _sqlService.UpdateSiteStatus(siteMetaData);
+                if (siteMetaData.Count > 0 && !statusesSaved)
+                    Error("StatusUpdateFailure", null, null, "Configuration or file operations may already have completed; verify portal statuses against committed SQL state.",
+                        "UpdateSiteStatus returned false for a nonempty site list. No SQL exception was supplied; inspect affected rows and database mappings.");
 
                 Console.WriteLine("Auto site configuration scan complete.");
             }
         }
         catch (Exception ex)
         {
+            if (activeFile is not null) ex.Data["AutoSiteFile"] = activeFile;
+            if (activeSite is not null) ex.Data["AutoSiteSite"] = activeSite;
             await FileHelperService.LogExceptionAsync(ex);
             throw;
         }

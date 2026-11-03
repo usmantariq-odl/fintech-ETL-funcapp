@@ -9,3 +9,5 @@ appsettings.json
 *.user
 *.log
 Logs/
+
+*.local.json

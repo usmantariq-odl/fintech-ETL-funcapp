@@ -18,7 +18,11 @@
     "ApplicationSettings__DiscardedFolder": "/Discarded",
     "ApplicationSettings__EmailRecipients": "YOUR_NOTIFICATION_RECIPIENTS",
     "AutoSiteEmailConnectionString": "REPLACE_WITH_EMAIL_CONNECTION_STRING_OR_KEY_VAULT_REFERENCE",
-    "AutoSiteEmailSender": "alerts@octopusdtl.com"
+    "AutoSiteEmailSender": "alerts@octopusdtl.com",
+    "ACS_EMAIL_CONNECTION_STRING": "REPLACE_WITH_ACS_CONNECTION_STRING_OR_KEY_VAULT_REFERENCE",
+    "EMAIL_FROM": "fintechfuel@octopusdtl.com",
+    "EMAIL_RECIPIENTS": "kamran.khalid@octopusdtl.com,khurram.mir@octopusdtl.com,ujaved@avanceon.ae,usman.tariq@octopusdtl.com,ameer.hamza@octopusdtl.com",
+    "AutoSiteErrorEmailEnabled": "true"
   },
   "IsEncrypted": false
 }

@@ -1,8 +1,41 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using FintechAutoSiteConfiguration.FunctionApp;
 using System.Text.Json;
 using FintechAutoSiteConfiguration.FunctionApp.Storage;
+
+// Explicit test sends only to the fixed test recipient; it never processes files or connects to SQL/SFTP.
+if (args.Contains("--test-error-email") || args.Contains("--preview-error-email"))
+{
+    var local = Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json");
+    if (File.Exists(local))
+    {
+        using var settings = JsonDocument.Parse(File.ReadAllText(local));
+        foreach (var entry in settings.RootElement.GetProperty("Values").EnumerateObject())
+            if (Environment.GetEnvironmentVariable(entry.Name) == null) Environment.SetEnvironmentVariable(entry.Name, entry.Value.GetString());
+    }
+    var digest = new AlertDigest();
+    digest.Add(new EtlAlert("ConfigurationRejectedOrFailed (example)", "002010 (example)", "/Unprocessed/CON-00201020261103120000.csv (synthetic)",
+        "Example only: rejected CON file moved to /Exception/2010/. No site changes were made for this test.",
+        "Synthetic validation example: CON tank product UnknownFuel has no matching customer product. No live data was read and no configuration was changed.",
+        "test-" + Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow,
+        "Example database (synthetic)", "fintechsftpdata.blob.core.windows.net"));
+    var body = AutoSiteErrorEmails.Render(digest, Environment.GetEnvironmentVariable("WEBSITE_SITE_NAME") ?? "Fintech AutoSite", true);
+    if (args.Contains("--preview-error-email"))
+    {
+        var directory = Path.Combine(Directory.GetCurrentDirectory(), "artifacts", "autosite-error-email");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "Example-Email.html"), body.Html);
+        Console.WriteLine("Email preview saved: " + Path.Combine(directory, "Example-Email.html"));
+        return;
+    }
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+    var operation = await AutoSiteErrorEmails.Send(Environment.GetEnvironmentVariable("ACS_EMAIL_CONNECTION_STRING"),
+        ["usman.tariq@octopusdtl.com"], body.Subject, body.Text, body.Html, timeout.Token);
+    Console.WriteLine("Test email accepted by ACS (Succeeded); recipient: usman.tariq@octopusdtl.com; operation: " + operation);
+    return;
+}
 
 // Read-only connectivity check: never resolves the parser or connects to SQL.
 if (args.Contains("--list-input"))

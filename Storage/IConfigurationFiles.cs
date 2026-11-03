@@ -2,6 +2,7 @@ namespace FintechAutoSiteConfiguration.FunctionApp.Storage;
 
 public interface IConfigurationFiles
 {
+    string DescribeSource(string localPath) => localPath;
     bool DirectoryExists(string path);
     string[] GetFiles(string directory, string pattern);
     void CreateDirectory(string path);

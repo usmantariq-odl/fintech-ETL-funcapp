@@ -93,5 +93,25 @@
     "name": "AutoSiteEmailSender",
     "value": "alerts@octopusdtl.com",
     "slotSetting": false
+  },
+  {
+    "name": "ACS_EMAIL_CONNECTION_STRING",
+    "value": "REPLACE_WITH_ACS_CONNECTION_STRING_OR_KEY_VAULT_REFERENCE",
+    "slotSetting": false
+  },
+  {
+    "name": "EMAIL_FROM",
+    "value": "fintechfuel@octopusdtl.com",
+    "slotSetting": false
+  },
+  {
+    "name": "EMAIL_RECIPIENTS",
+    "value": "kamran.khalid@octopusdtl.com,khurram.mir@octopusdtl.com,ujaved@avanceon.ae,usman.tariq@octopusdtl.com,ameer.hamza@octopusdtl.com",
+    "slotSetting": false
+  },
+  {
+    "name": "AutoSiteErrorEmailEnabled",
+    "value": "true",
+    "slotSetting": false
   }
 ]

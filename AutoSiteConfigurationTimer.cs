@@ -14,7 +14,22 @@ public sealed class AutoSiteConfigurationTimer(
     [Function("AutoSiteConfigurationTimer")]
     public async Task RunAsync(
         [TimerTrigger("0 */5 * * * *", RunOnStartup = false, UseMonitor = true)] TimerInfo timer,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, FunctionContext? context = null)
+    {
+        using var alerts = new AutoSiteErrorEmails(logger, context?.InvocationId ?? Guid.NewGuid().ToString("N"));
+        try { await RunCoreAsync(timer, cancellationToken, alerts); }
+        catch (Exception) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "AutoSite invocation failed; inspect CON inputs, outputs and committed configuration before retry");
+            alerts.Report(ex is ConfigurationStorageException ? "StorageFailure" : "InvocationFailure",
+                ex.Data["AutoSiteSite"] as string, ex.Data["AutoSiteFile"] as string,
+                "Scan aborted. Some configuration changes or file moves may already have completed. Verify actual database and storage state before replay.", ex.ToString());
+            throw;
+        }
+    }
+
+    private async Task RunCoreAsync(TimerInfo timer, CancellationToken cancellationToken, AutoSiteErrorEmails alerts)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (timer.IsPastDue)
@@ -32,7 +47,7 @@ public sealed class AutoSiteConfigurationTimer(
         logger.LogInformation("Auto site configuration scan started at {StartedUtc}.", DateTimeOffset.UtcNow);
         var channel = Channel.CreateUnbounded<string>();
         var parser = scope.ServiceProvider.GetRequiredService<ParserService>();
-        await parser.ProcessFilesAsync(channel);
+        await parser.ProcessFilesAsync(channel, alerts.Report);
         logger.LogInformation("Auto site configuration scan completed at {CompletedUtc}.", DateTimeOffset.UtcNow);
     }
 }

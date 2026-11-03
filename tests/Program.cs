@@ -2,6 +2,12 @@ using System.Text;
 using FintechAutoSiteConfiguration.FunctionApp.Storage;
 using Microsoft.Extensions.Options;
 
+if (args.Contains("--email-outbox-check"))
+{
+    await LiveEmailOutboxCheck.Run();
+    return;
+}
+
 if (args.Contains("--live-transaction-check"))
 {
     await LiveTransactionCheck.RunAsync();
@@ -15,6 +21,7 @@ if (args.Contains("--live-sidecar-check"))
 }
 
 await ReconfigurationChecks.RunAsync();
+AutoSiteEmailChecks.Run();
 
 var scenarios = new (string Name, Action Test)[]
 {
