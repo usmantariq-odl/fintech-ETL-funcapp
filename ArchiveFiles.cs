@@ -1,11 +1,31 @@
 using System.Formats.Tar;
 using System.Globalization;
 using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace CSVReader;
 
 internal static class ArchiveFiles
 {
+    internal static string ContentHash(string file)
+    {
+        using var stream = File.OpenRead(file);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    internal static string ContentManifestHash(string root, IReadOnlyDictionary<string, string> contentHashes)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var item in contentHashes.OrderBy(kv => Path.GetRelativePath(root, kv.Key).Replace('\\', '/'), StringComparer.Ordinal))
+        {
+            hash.AppendData(Encoding.UTF8.GetBytes(Path.GetRelativePath(root, item.Key).Replace('\\', '/')));
+            hash.AppendData(new byte[] { 0 });
+            hash.AppendData(Convert.FromHexString(item.Value));
+        }
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
     internal const int MaxEntries = 1000;
     internal const long MaxEntryBytes = 100_000_000;
     internal const long MaxTotalBytes = 250_000_000;

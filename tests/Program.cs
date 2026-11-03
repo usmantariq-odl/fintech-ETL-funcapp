@@ -77,7 +77,7 @@ foreach (var extension in new[] { ".zip", ".tgz", ".tar.gz" })
         var retryRoot = Path.Combine(root, "retry"); Directory.CreateDirectory(retryRoot);
         var retry = Path.Combine(retryRoot, Path.GetFileName(archive)); File.Copy(archive, retry);
         var replay = processor.ProcessArchive(retry, "/Unprocessed/600005/input/test" + extension, "600005", _ => { });
-        Check(replay.Result == EtlResult.Partial && backend.Calls.Count == count, "Move retry reprocessed completed CSVs.");
+        Check(replay.Result == EtlResult.Partial && backend.Calls.Count == count + 1, "Retry must skip committed CSVs and retry the failed CSV.");
     });
     Test($"{extension}: regenerated marker and hourly window", root =>
     {
@@ -534,13 +534,13 @@ Test("Checkpoint failure rolls back CSV data and retries without CSV audit rows"
     processor.ProcessArchive(retry, "/input/checkpoint.zip", "600005", _ => { });
     Check(backend.Committed == 1 && backend.RecordTypes.All(t => t == "ZIP"), "Retry did not commit once using only archive audit rows.");
 });
-Test("Historical CSV checkpoints are read without new CSV audit records", root =>
+Test("Path-only history cannot suppress current CSV payloads", root =>
 {
     var archive = Make(root, ".zip", ("PSL.csv", "data"), ("TIN.csv", "data"));
     var backend = new FakeBackend();
     backend.SeedLegacyCheckpoint("/input/legacy.zip!/PSL.csv", "Processed");
     new FtpConnectivity(log, backend).ProcessArchive(archive, "/input/legacy.zip", "600005", _ => { });
-    Check(backend.Calls.Count == 1 && Path.GetFileName(backend.Calls[0]) == "TIN.csv", "Legacy success was inserted twice.");
+    Check(backend.Calls.Count == 2, "Path-only legacy history suppressed an unverified current payload.");
     Check(backend.RecordTypes.SequenceEqual(new[] { "ZIP" }), "Historical replay created CSV audit rows.");
 });
 Test("Regeneration progress uses separate checkpoints", root =>
@@ -550,7 +550,7 @@ Test("Regeneration progress uses separate checkpoints", root =>
     new FtpConnectivity(log, backend).ProcessArchive(archive, "/input/regen.tgz", "600005", _ => { });
     Check(backend.RecordTypes.SequenceEqual(new[] { "TGZ" }) && backend.Checkpoints["/input/regen.tgz!/hourly-regeneration"] == "Processed", "Regeneration created a synthetic archive audit row.");
 });
-Test("Historical partial archive preserves failed and successful CSV routing", root =>
+Test("Historical partial archive retries CSVs without verified content checkpoints", root =>
 {
     var archive = Make(root, ".zip", ("PSL.csv", "data"), ("TIN.csv", "bad"));
     var backend = new FakeBackend();
@@ -558,8 +558,8 @@ Test("Historical partial archive preserves failed and successful CSV routing", r
     backend.SeedLegacyCheckpoint("/input/partial.zip!/PSL.csv", "Processed");
     backend.SeedLegacyCheckpoint("/input/partial.zip!/TIN.csv", "Failed");
     var result = new FtpConnectivity(log, backend).ProcessArchive(archive, "/input/partial.zip", "600005", _ => { });
-    Check(result.Result == EtlResult.Partial && backend.Calls.Count == 0 && backend.Checkpoints.Count == 0, "Historical terminal CSVs were processed again.");
-    Check(backend.RecordTypes.SequenceEqual(new[] { "ZIP" }) && result.Outputs.Select(o => o.Folder).SequenceEqual(new[] { "Processed", "ExceptionFile" }), "Historical split routing changed.");
+    Check(result.Result == EtlResult.Processed && backend.Calls.Count == 2 && backend.Checkpoints.Count == 2, "Historical failure blocked the recovery attempt.");
+    Check(backend.RecordTypes.SequenceEqual(new[] { "ZIP" }) && result.Outputs.Single().Folder == "Processed", "Recovered archive routing is wrong.");
 });
 Test("Standalone MagLink CSV uses checkpoints without archive audit rows", root =>
 {
@@ -586,12 +586,97 @@ Test("Checkpoint identities preserve site zeros and previous input layout", _ =>
     Throws<InvalidDataException>(() => SqlFileCheckpoints.CanonicalKey(new string('a', 1281)));
     Check(typeof(SqlFileCheckpoints).Assembly.GetManifestResourceNames().Contains("FintechEtl.FunctionApp.deployment.Create-EtlFileCheckpoints.sql"), "Checkpoint schema is not embedded in the deployment.");
 });
+foreach (var extension in new[] { ".zip", ".tgz", ".tar.gz" })
+{
+    Test($"{extension}: same-name exception replay adds missing PSL after archive was Processed", root =>
+    {
+        var backend = new FakeBackend(); var processor = new FtpConnectivity(log, backend);
+        var remote = "/Unprocessed/600005/input/60000520261019120000" + extension;
+        var original = Make(Path.Combine(root, "original"), extension, ("TIN.csv", "tank data"));
+        processor.ProcessArchive(original, remote, "600005", _ => { });
+        Check(backend.Status(remote) == "Processed", "First archive did not finish.");
+        var replay = Make(Path.Combine(root, "exception-replay"), extension, ("PSL.csv", "missing transactions"));
+        var result = processor.ProcessArchive(replay, remote, "600005", _ => { });
+        Check(result.Result == EtlResult.Processed && backend.Calls.Count == 2 && backend.Calls.Last().EndsWith("PSL.csv"), "Processed archive name suppressed a new PSL.");
+        Check(backend.DataIds.All(id => id == 1), "Replay lost the original parent ProcessedFileID.");
+        var identical = Make(Path.Combine(root, "identical"), extension, ("PSL.csv", "missing transactions"));
+        processor.ProcessArchive(identical, remote, "600005", _ => { });
+        Check(backend.Calls.Count == 2, "Identical committed PSL was processed twice.");
+        var changed = Make(Path.Combine(root, "changed"), extension, ("PSL.csv", "missing transactions plus new rows"));
+        processor.ProcessArchive(changed, remote, "600005", _ => { });
+        Check(backend.Calls.Count == 3, "A previously successful CSV name suppressed different content.");
+    });
+    Test($"{extension}: partial split keeps failed PSL retryable with the same filename", root =>
+    {
+        var backend = new FakeBackend { Fail = "PSL.csv" }; var processor = new FtpConnectivity(log, backend);
+        var remote = "/Unprocessed/600005/input/60000520261019120000" + extension;
+        var original = Make(root, extension, ("PSL.csv", "transactions"), ("TIN.csv", "tank data"));
+        var partial = processor.ProcessArchive(original, remote, "600005", _ => { });
+        Check(partial.Result == EtlResult.Partial && backend.Status(remote) == "Partial", "Mixed CSV outcomes lost Partial status.");
+        var good = ArchiveFiles.Extract(partial.Outputs.Single(o => o.Folder == "Processed").LocalPath, Path.Combine(root, "good"));
+        var failedOutput = partial.Outputs.Single(o => o.Folder == "ExceptionFile");
+        var bad = ArchiveFiles.Extract(failedOutput.LocalPath, Path.Combine(root, "bad"));
+        Check(good.Length == 1 && Path.GetFileName(good[0]) == "TIN.csv" && bad.Length == 1 && Path.GetFileName(bad[0]) == "PSL.csv", "Partial CSV subsets were not preserved.");
+        var retryDir = Path.Combine(root, "retry"); Directory.CreateDirectory(retryDir);
+        var retry = Path.Combine(retryDir, Path.GetFileName(original)); File.Copy(failedOutput.LocalPath, retry);
+        backend.Fail = null;
+        var recovered = processor.ProcessArchive(retry, remote, "600005", _ => { });
+        Check(recovered.Result == EtlResult.Processed && backend.Status(remote) == "Processed" && backend.Calls.Count == 3, "Failed PSL checkpoint blocked recovery.");
+        Check(backend.Committed == 2 && backend.RolledBack == 1 && backend.DataIds.All(id => id == 1), "Recovery did not retain transactions and parent identity.");
+    });
+}
+Test("Fully failed CSV retries after correction without requiring a new filename", root =>
+{
+    var backend = new FakeBackend { Fail = "PSL.csv" }; var processor = new FtpConnectivity(log, backend);
+    var original = Make(root, ".tgz", ("PSL.csv", "transactions"));
+    Check(processor.ProcessArchive(original, "/input/failed.tgz", "600005", _ => { }).Result == EtlResult.Failed, "Failed archive was not Failed.");
+    var dir = Path.Combine(root, "retry"); Directory.CreateDirectory(dir);
+    var retry = Path.Combine(dir, Path.GetFileName(original)); File.Copy(original, retry);
+    backend.Fail = null;
+    Check(processor.ProcessArchive(retry, "/input/failed.tgz", "600005", _ => { }).Result == EtlResult.Processed && backend.Committed == 1, "Failed archive did not recover.");
+});
+Test("Regeneration runs again for changed CSV content but not publication retries", root =>
+{
+    var backend = new FakeBackend(); var processor = new FtpConnectivity(log, backend);
+    foreach (var (folder, text) in new[] { ("first", "regenerated\ntransactions"), ("retry", "regenerated\ntransactions"), ("changed", "regenerated\ntransactions plus missing rows") })
+    {
+        var archive = Make(Path.Combine(root, folder), ".tgz", ("PSL.csv", text));
+        processor.ProcessArchive(archive, "/input/regen.tgz", "600005", _ => { });
+    }
+    Check(backend.RegenerationCalls == 2 && backend.Calls.Count == 2, "Regeneration checkpoint ignored a changed payload or repeated unchanged work.");
+});
+Test("Same-name MagLink CSV processes changed contents without CSV audit rows", root =>
+{
+    var file = Path.Combine(root, "stockLevels.csv"); File.WriteAllText(file, "first reading");
+    var backend = new FakeBackend(); var processor = new FtpConnectivity(log, backend);
+    processor.ProcessMagLink(file, "/MagLink/600005/stockLevels.csv", "600005");
+    File.WriteAllText(file, "updated reading");
+    processor.ProcessMagLink(file, "/MagLink/600005/stockLevels.csv", "600005");
+    processor.ProcessMagLink(file, "/MagLink/600005/stockLevels.csv", "600005");
+    Check(backend.Committed == 2 && backend.Calls.Count == 2 && backend.RecordTypes.Count == 0, "MagLink content versions were conflated.");
+});
+Test("SQL checkpoint identity distinguishes content versions without changing schema", root =>
+{
+    var file = Path.Combine(root, "PSL.csv"); File.WriteAllText(file, "first"); var first = ArchiveFiles.ContentHash(file);
+    File.WriteAllText(file, "second"); var second = ArchiveFiles.ContentHash(file);
+    byte[] Key(string path, string hash)
+    {
+        using var command = new System.Data.SqlClient.SqlCommand(); SqlFileCheckpoints.AddKey(command, path, hash);
+        Check((string)command.Parameters["@RemoteKey"].Value == SqlFileCheckpoints.CanonicalKey(path), "Remote key lost its readable identity.");
+        return (byte[])command.Parameters["@KeyHash"].Value;
+    }
+    var remote = "/Unprocessed/007001/input/archive.tgz!/nested/PSL.csv";
+    Check(!Key(remote, first).SequenceEqual(Key(remote, second)) && !Key(remote, first).SequenceEqual(Key(remote, null)), "Different or unverified payloads share a checkpoint.");
+    Check(Key(remote, first).SequenceEqual(Key(remote.Replace("/Unprocessed", "").Replace('/', '\\'), first.ToLowerInvariant())), "Content checkpoint aliases or hash case are inconsistent.");
+    Throws<InvalidDataException>(() => Key(remote, "invalid"));
+});
 Console.WriteLine($"{passed} regression scenarios passed. No SQL/SFTP connections or live writes were made.");
 
 sealed class FakeBackend : IEtlBackend
 {
     readonly Dictionary<string, int> ids = new();
     readonly Dictionary<int, string> statuses = new();
+    readonly Dictionary<string, string> contentStatuses = new();
     public List<string> Calls { get; } = [];
     public List<string> RecordTypes { get; } = [];
     public List<int?> DataIds { get; } = [];
@@ -601,6 +686,7 @@ sealed class FakeBackend : IEtlBackend
     public string Fail { get; set; }
     public bool FailRegeneration { get; set; }
     public DateTime? Regeneration { get; private set; }
+    public int RegenerationCalls { get; private set; }
     public int Committed { get; private set; }
     public int RolledBack { get; private set; }
     public bool IsConfigured(string site) => Configured;
@@ -612,12 +698,13 @@ sealed class FakeBackend : IEtlBackend
         return id;
     }
     public void SetStatus(int id, string status, string error = null) => statuses[id] = status;
-    public string CheckpointStatus(string key) => Checkpoints.GetValueOrDefault(key) ?? Status(key);
-    public void SetCheckpoint(string key, string status, string error = null)
+    public string CheckpointStatus(string key, string contentHash) => contentStatuses.GetValueOrDefault(key + "|" + contentHash);
+    public void SetCheckpoint(string key, string contentHash, string status, string error = null)
     {
         if (FailCheckpoint && status == "Processed") throw new RetryableEtlException("Test checkpoint failure.");
-        if (Transaction.Current == null) Checkpoints[key] = status;
-        else Transaction.Current.EnlistVolatile(new TestWrite(() => Checkpoints[key] = status, () => { }), EnlistmentOptions.None);
+        void Commit() { Checkpoints[key] = status; contentStatuses[key + "|" + contentHash] = status; }
+        if (Transaction.Current == null) Commit();
+        else Transaction.Current.EnlistVolatile(new TestWrite(Commit, () => { }), EnlistmentOptions.None);
     }
     public void SeedLegacyCheckpoint(string key, string status)
     {
@@ -637,6 +724,7 @@ sealed class FakeBackend : IEtlBackend
     public void Regenerate(string site, DateTime timestamp)
     {
         if (FailRegeneration) throw new RetryableEtlException("Test timeout.");
+        RegenerationCalls++;
         Regeneration = timestamp;
     }
 }

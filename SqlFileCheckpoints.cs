@@ -37,27 +37,32 @@ internal sealed class SqlFileCheckpoints(string connectionString)
         return normalized;
     }
 
-    internal static void AddKey(SqlCommand command, string key)
+    internal static void AddKey(SqlCommand command, string key, string contentHash = null)
     {
         var canonical = CanonicalKey(key);
-        command.Parameters.Add("@KeyHash", SqlDbType.Binary, 32).Value = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        if (contentHash != null && (contentHash.Length != 64 || contentHash.Any(c => !Uri.IsHexDigit(c))))
+            throw new InvalidDataException("ETL checkpoint content hash must be a SHA-256 hex digest.");
+        // Preserve the schema and readable remote key. A payload version has its own
+        // primary key; path-only history can never mark different bytes as complete.
+        var identity = contentHash == null ? canonical : canonical + "\0sha256:" + contentHash.ToLowerInvariant();
+        command.Parameters.Add("@KeyHash", SqlDbType.Binary, 32).Value = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
         command.Parameters.Add("@RemoteKey", SqlDbType.NVarChar, 1280).Value = canonical;
     }
 
-    public string Status(string key)
+    public string Status(string key, string contentHash = null)
     {
         using var connection = new SqlConnection(connectionString);
         using var command = new SqlCommand(ReadSql, connection);
-        AddKey(command, key);
+        AddKey(command, key, contentHash);
         connection.Open();
         return command.ExecuteScalar() as string;
     }
 
-    public void SetStatus(string key, string status, string error)
+    public void SetStatus(string key, string status, string error, string contentHash = null)
     {
         using var connection = new SqlConnection(connectionString);
         using var command = new SqlCommand(WriteSql, connection);
-        AddKey(command, key);
+        AddKey(command, key, contentHash);
         command.Parameters.Add("@Status", SqlDbType.VarChar, 50).Value = status;
         command.Parameters.Add("@Error", SqlDbType.NVarChar, -1).Value = (object)error ?? DBNull.Value;
         connection.Open();

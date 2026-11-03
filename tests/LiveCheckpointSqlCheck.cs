@@ -35,18 +35,18 @@ internal static class LiveCheckpointSqlCheck
             create.ExecuteNonQuery();
         }
         const string key = "/Unprocessed/007001/input/archive.tgz!/nested/PSL.csv";
-        void Write(string remote, string status)
+        void Write(string remote, string status, string contentHash = null)
         {
             using var command = new SqlCommand(SqlFileCheckpoints.WriteSql.Replace("dbo.Fintech_EtlFileCheckpoints", table), connection);
-            SqlFileCheckpoints.AddKey(command, remote);
+            SqlFileCheckpoints.AddKey(command, remote, contentHash);
             command.Parameters.Add("@Status", SqlDbType.VarChar, 50).Value = status;
             command.Parameters.Add("@Error", SqlDbType.NVarChar, -1).Value = DBNull.Value;
             command.ExecuteNonQuery();
         }
-        string Read(string remote)
+        string Read(string remote, string contentHash = null)
         {
             using var command = new SqlCommand(SqlFileCheckpoints.ReadSql.Replace("dbo.Fintech_EtlFileCheckpoints", table), connection);
-            SqlFileCheckpoints.AddKey(command, remote);
+            SqlFileCheckpoints.AddKey(command, remote, contentHash);
             return command.ExecuteScalar() as string;
         }
         using (var transaction = EtlTransaction.Begin())
@@ -67,6 +67,22 @@ internal static class LiveCheckpointSqlCheck
         if (Read(key) != "Processed" || Read(key + "-rollback") != null) throw new Exception("SQL checkpoint rollback failed.");
         using var count = new SqlCommand("SELECT COUNT(*) FROM " + table, connection);
         if (Convert.ToInt32(count.ExecuteScalar()) != 1) throw new Exception("Checkpoint upsert produced duplicate rows.");
-        Console.WriteLine("PASS SQL checkpoint schema/idempotency, insert/update, canonical lookup, ambient commit and rollback. Only a session-local temporary table was written; no application rows or persistent schema changed.");
+        var firstHash = new string('a', 64); var secondHash = new string('b', 64);
+        using (var transaction = EtlTransaction.Begin())
+        {
+            connection.EnlistTransaction(Transaction.Current);
+            Write(key, "Processed", firstHash); Write(key, "Failed", secondHash);
+            transaction.Complete();
+        }
+        if (Read(key, firstHash.ToUpperInvariant()) != "Processed" || Read(key, secondHash) != "Failed" || Read(key) != "Processed")
+            throw new Exception("Content versions were conflated with each other or legacy history.");
+        using (var transaction = EtlTransaction.Begin())
+        {
+            connection.EnlistTransaction(Transaction.Current);
+            Write(key, "Processed", secondHash);
+        }
+        if (Read(key, secondHash) != "Failed") throw new Exception("Content checkpoint rollback failed.");
+        if (Convert.ToInt32(count.ExecuteScalar()) != 3) throw new Exception("Content checkpoint versions were not stored separately.");
+        Console.WriteLine("PASS SQL checkpoint schema/idempotency, content versions, insert/update, canonical lookup, ambient commit and rollback. Only a session-local temporary table was written; no application rows or persistent schema changed.");
     }
 }

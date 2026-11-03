@@ -16,8 +16,9 @@ Reviewed October 19, 2026 against the working tree in `../FintechETL` (especiall
 | CON inside unconfigured archives | Ignored | Forward before notconfigured routing; configured-site forwarding also supported |
 | CON shared production/staging destinations | Missing | User-selected `con-files` container with separate SFTP login; incoming CONs go to `/Unprocessed` with source-style duplicate handling |
 | MagLink stock/delivery | Reader/DAL copied but no discovery or dispatch | Optional `MagLinkSftpRoot`; site checking, SQL tracking and separate result folders |
-| Duplicate archive preservation | Present | Preserved for all formats and MagLink |
-| Per-CSV committed writes on retry | Partial rows could survive failures | CSV writes + successful checkpoint are transactional; completed CSVs skipped during retry |
+| Duplicate archive preservation | Present | Same-name inputs are evaluated before archiving; destination collisions go to `duplicate`, matching the source |
+| Partial and failed archive replay | Source retries incoming CSVs | Failed CSVs retry; a prior parent status cannot suppress newly supplied PSL CSVs |
+| Per-CSV committed writes on retry | Partial rows could survive failures | CSV writes + content-specific successful checkpoint are transactional; only identical completed payloads skip during retry |
 | Hard-coded SQL index hints | Required stress-specific names | Removed; optimizer can select available indexes |
 | Remote path tracking | OS-dependent separators | Canonical remote paths with compatibility lookups for old records |
 | Concurrency safety | Function timer coordination only | SQL session locks per site, including separate instances of this version |
@@ -37,6 +38,8 @@ October 21 database switch: the user selected `FintechStressTesting` again, then
 - Dead IoT/ADX paths and a disabled TriggerLogicApp path were not revived. They are not active ingestion logic in the source.
 
 ## Evidence and remaining verification
+
+- November 3, 2026: compared `FintechETL/FtpConnectivity.cs:readDataFromCSV`, `ProcessedFiles.cs:moveProcessedFiles` and `DAL.cs:AddDataToTransactions` with the Function. Removed the Function-only parent `Processed` shortcut and terminal-failed-CSV shortcut. Completion checkpoints now include CSV content identity so changed/new CSVs and same-name exception subsets are processed, while unchanged committed payloads retain restart protection. Transaction duplicate selection by mapped site + `Sale_ID`, archive `duplicate` preservation and current-attempt `Processed`/`Partial`/`Failed` status remain source-compatible. The original source's swallowed row conversion errors are intentionally not reintroduced; the Function continues rolling back a failed CSV. No application data recovery or Azure deployment is performed by these code changes.
 
 - November 2, 2026: archive audit records remain in `Fintech_ProcessedFiles`; CSV, MagLink and regeneration progress now uses the separate `dbo.Fintech_EtlFileCheckpoints` table. CSV data and its success checkpoint still commit in the same transaction, and historical CSV audit records remain readable for retry compatibility. Timer startup creates the new table if absent; databases with restricted DDL permissions can use `deployment/Create-EtlFileCheckpoints.sql` before deployment. Existing records are not deleted. The original VM ETL and AutoSite branch are unchanged.
 
