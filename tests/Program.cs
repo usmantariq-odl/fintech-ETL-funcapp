@@ -8,6 +8,12 @@ using FintechEtl.FunctionApp;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 
+if (args.Contains("--email-outbox-check"))
+{
+    await LiveEmailOutboxCheck.Run();
+    return;
+}
+
 if (args.Contains("--checkpoint-sql-check"))
 {
     LiveCheckpointSqlCheck.Run();
@@ -669,6 +675,56 @@ Test("SQL checkpoint identity distinguishes content versions without changing sc
     Check(!Key(remote, first).SequenceEqual(Key(remote, second)) && !Key(remote, first).SequenceEqual(Key(remote, null)), "Different or unverified payloads share a checkpoint.");
     Check(Key(remote, first).SequenceEqual(Key(remote.Replace("/Unprocessed", "").Replace('/', '\\'), first.ToLowerInvariant())), "Content checkpoint aliases or hash case are inconsistent.");
     Throws<InvalidDataException>(() => Key(remote, "invalid"));
+});
+Test("Individual email keeps one event, site and file diagnostics after persistence", root =>
+{
+    for (var i = 0; i < 500; i++)
+    {
+        var item = new EtlAlert("FileRetry", "007001", "file" + i, "Input retained", "example", "run", DateTimeOffset.UtcNow);
+        var saved = JsonSerializer.Deserialize<EtlAlert>(JsonSerializer.Serialize(item));
+        var message = new AlertDigest(); message.Add(saved);
+        var rendered = EtlErrorEmails.Render(message, "test-app", false);
+        Check(message.Total == 1 && message.Samples.Count == 1 && rendered.Subject.Contains("007001") && rendered.Text.Contains("file" + i), "Individual event was merged or lost.");
+    }
+});
+Test("Error email redacts credentials and encodes untrusted diagnostics", root =>
+{
+    var old = Environment.GetEnvironmentVariable("TestConnectionString");
+    try
+    {
+        Environment.SetEnvironmentVariable("TestConnectionString", "Server=example;Password=SentinelSecret123;AccessKey=SentinelKey456;");
+        var digest = new AlertDigest();
+        digest.Add(new("Partial", "007001", "file", "Split", "<script>bad</script> SentinelSecret123 SentinelKey456 Password=OtherSecret789", "run", DateTimeOffset.UtcNow));
+        var message = EtlErrorEmails.Render(digest, "test-app", true);
+        Check(!message.Text.Contains("SentinelSecret") && !message.Text.Contains("SentinelKey") && !message.Text.Contains("OtherSecret"), "Credentials leaked into email.");
+        Check(!message.Html.Contains("<script>") && message.Html.Contains("&lt;script&gt;") && message.Text.Contains("synthetic notification test"), "HTML encoding or test labeling missing.");
+    }
+    finally { Environment.SetEnvironmentVariable("TestConnectionString", old); }
+});
+Test("Partial result exposes the actual failed CSV diagnostic for alerting", root =>
+{
+    var archive = Make(root, ".tgz", ("PSL.csv", "bad"), ("TIN.csv", "good"));
+    var backend = new FakeBackend { Fail = "PSL.csv" };
+    var outcome = new FtpConnectivity(log, backend).ProcessArchive(archive, "/Unprocessed/600005/input/example.tgz", "600005", _ => { });
+    Check(outcome.Result == EtlResult.Partial && outcome.Errors.Count == 1 && outcome.Errors[0].Contains("PSL.csv"), "Partial failure has no CSV-specific diagnostics.");
+});
+Test("Email recipients trim and deduplicate addresses", root =>
+{
+    var old = Environment.GetEnvironmentVariable("EMAIL_RECIPIENTS");
+    try
+    {
+        Environment.SetEnvironmentVariable("EMAIL_RECIPIENTS", "usman.tariq@octopusdtl.com, usman.tariq@octopusdtl.com; ameer.hamza@octopusdtl.com");
+        Check(EtlErrorEmails.Recipients().Length == 2, "Recipients contain duplicate or untrimmed addresses.");
+        Environment.SetEnvironmentVariable("EMAIL_RECIPIENTS", "invalid address");
+        Throws<System.FormatException>(() => EtlErrorEmails.Recipients());
+    }
+    finally { Environment.SetEnvironmentVariable("EMAIL_RECIPIENTS", old); }
+});
+Test("Notconfigured alert depends on destination folder existence, including empty folders", root =>
+{
+    Check(EtlTimer.ShouldAlertNotConfigured(["notconfigured"], _ => false), "First file into a missing site folder should notify.");
+    Check(!EtlTimer.ShouldAlertNotConfigured(["notconfigured"], _ => true), "Existing site folder must suppress notification even if empty.");
+    Check(!EtlTimer.ShouldAlertNotConfigured(["MagLinkNotConfigured"], _ => true), "MagLink destination should use the same suppression rule.");
 });
 Console.WriteLine($"{passed} regression scenarios passed. No SQL/SFTP connections or live writes were made.");
 

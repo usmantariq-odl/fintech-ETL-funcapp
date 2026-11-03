@@ -14,6 +14,38 @@ hierarchy.Root.AddAppender(new ConsoleAppender { Layout = new PatternLayout("%da
 hierarchy.Root.Level = log4net.Core.Level.Info;
 hierarchy.Configured = true;
 
+// Explicit test sends only to the fixed test recipient; it never processes files or connects to SQL/SFTP.
+if (args.Contains("--test-error-email") || args.Contains("--preview-error-email"))
+{
+    var local = Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json");
+    if (File.Exists(local))
+    {
+        using var settings = JsonDocument.Parse(File.ReadAllText(local));
+        foreach (var entry in settings.RootElement.GetProperty("Values").EnumerateObject())
+            if (Environment.GetEnvironmentVariable(entry.Name) == null) Environment.SetEnvironmentVariable(entry.Name, entry.Value.GetString());
+    }
+    var digest = new AlertDigest();
+    digest.Add(new EtlAlert("TEST / Partial", "007001 (example)", "/Unprocessed/007001/input/example.tgz (synthetic)",
+        "Example only: successful CSVs would go to Processed and failed CSVs to ExceptionFile.",
+        "Synthetic validation example: PSL.csv has a missing product mapping. No live data was read or changed.",
+        "test-" + Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow,
+        "Example database (synthetic)", "fintechsftpdata.blob.core.windows.net"));
+    var body = EtlErrorEmails.Render(digest, Environment.GetEnvironmentVariable("WEBSITE_SITE_NAME") ?? "Fintech ETL", true);
+    if (args.Contains("--preview-error-email"))
+    {
+        var directory = Path.Combine(Directory.GetCurrentDirectory(), "artifacts", "etl-error-email");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "Example-Email.html"), body.Html);
+        Console.WriteLine("Email preview saved: " + Path.Combine(directory, "Example-Email.html"));
+        return;
+    }
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+    var operation = await EtlErrorEmails.Send(Environment.GetEnvironmentVariable("ACS_EMAIL_CONNECTION_STRING"),
+        ["usman.tariq@octopusdtl.com"], body.Subject, body.Text, body.Html, timeout.Token);
+    Console.WriteLine("Test email accepted by ACS (Succeeded); recipient: usman.tariq@octopusdtl.com; operation: " + operation);
+    return;
+}
+
 if (args.Contains("--prepare-con"))
 {
     using var json = JsonDocument.Parse(File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "local.settings.json")));

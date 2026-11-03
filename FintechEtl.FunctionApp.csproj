@@ -10,6 +10,7 @@
     <EmbeddedResource Include="deployment/Create-EtlFileCheckpoints.sql" />
     <Compile Remove="tests/**/*.cs" />
     <InternalsVisibleTo Include="FintechEtl.RegressionTests" />
+    <None Update="etl-email-app-settings.local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <None Update="local.settings.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <None Update="azure-app-settings.local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.50.0" />
@@ -17,6 +18,8 @@
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Timer" Version="4.3.1" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Http" Version="3.3.0" />
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
+    <PackageReference Include="Azure.Communication.Email" Version="1.1.0" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.26.0" />
     <PackageReference Include="SSH.NET" Version="2026.0.0" />
     <PackageReference Include="System.Data.SqlClient" Version="4.8.6" />
     <PackageReference Include="log4net" Version="3.4.0" />

@@ -8,7 +8,10 @@ namespace CSVReader;
 internal sealed class RetryableEtlException(string message, Exception inner = null) : Exception(message, inner);
 internal enum EtlResult { Processed, Regenerated, Partial, Failed, NotConfigured }
 internal sealed record ArchiveOutput(string LocalPath, string Folder);
-internal sealed record EtlOutcome(EtlResult Result, IReadOnlyList<ArchiveOutput> Outputs);
+internal sealed record EtlOutcome(EtlResult Result, IReadOnlyList<ArchiveOutput> Outputs)
+{
+    public IReadOnlyList<string> Errors { get; init; } = [];
+}
 
 // Keeps archive/routing regression tests independent of SQL and SFTP.
 internal interface IEtlBackend
@@ -60,6 +63,7 @@ public sealed class FtpConnectivity
             var contentHashes = files.ToDictionary(file => file, ArchiveFiles.ContentHash);
             var succeeded = new List<string>();
             var failed = new List<string>();
+            var errors = new List<string>();
             foreach (var file in files)
             {
                 isExceptionOccured = isFileRegrenerated = false;
@@ -94,6 +98,7 @@ public sealed class FtpConnectivity
                 {
                     backend.SetCheckpoint(key, contentHash, "Failed", ex.Message);
                     failed.Add(file);
+                    if (errors.Count < 20) errors.Add(Path.GetRelativePath(root, file) + ": " + FintechEtl.FunctionApp.EtlErrorEmails.Redact(ex.ToString()));
                     log.Error($"CSV failed: {Path.GetFileName(file)}", ex);
                 }
             }
@@ -129,7 +134,7 @@ public sealed class FtpConnectivity
             }
             backend.SetStatus(parentId, result is EtlResult.Processed or EtlResult.Regenerated ? "Processed" : result.ToString(),
                 failed.Count > 0 ? $"Processed CSVs: {succeeded.Count}; Failed CSVs: {failed.Count}." : null);
-            return new(result, outputs);
+            return new(result, outputs) { Errors = errors };
         }
         catch (Exception ex)
         {

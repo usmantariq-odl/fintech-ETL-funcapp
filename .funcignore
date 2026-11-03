@@ -8,3 +8,4 @@ backlog-runs/
 *.zip
 local.settings.json
 azure-app-settings.local.json
+etl-email-app-settings.local.json

@@ -229,3 +229,37 @@ On October 21, 2026, the requested database was changed back to `FintechStressTe
 The initial CON SFTP preparation attempt failed because Azure returned **SSH/SFTP are not enabled for this account**. The separate CON permission grant succeeded after MFA sign-in. Subsequently, the user requested SFTP enablement; Azure confirmed `isSftpEnabled=true`, and both container connections passed read-only directory checks. No ETL run, deployment or database schema changes were initiated as part of these checks. The currently deployed Azure application settings were not changed; deploy the build and apply the updated private settings export when ready.
 
 Production sign-off still requires a controlled end-to-end test of uploads/routing/regeneration, the MagLink source path if needed, and normal capacity/alert verification. Database selection follows `FintechSqlConnectionString`; secondary-database writes remain disabled.
+
+
+## ETL error email alerts (ACS)
+
+The ETL timer sends an individual dark, table-based HTML error notification with a plain-text alternative. It includes event counts, site ID (leading zeros preserved), input path, routing/retry disposition, UTC and Pakistan timestamps, invocation ID, configured SQL database, SFTP host and redacted exception/stack details. Per-CSV failures are included for `Partial` / `Failed` archives; the full errors also remain in Function logs.
+
+| Case | Email behavior |
+|---|---|
+| Timer/configuration/SQL schema or discovery failure | InvocationFailure; original invocation still fails |
+| Site connection/scan/lease failure | SiteScanFailure |
+| File download/SQL/CON delivery/publication failure retained for retry | FileRetry, with actual exception |
+| File moved to ExceptionFile / MagLinkException | FileProcessingFailure or Failed / Partial; includes failing CSV diagnostics where available |
+| Oversized input moved to exception | OversizedInput |
+| Invalid archive name moved to invalidFile | InvalidFilename; failed move is ArchiveMoveFailure |
+| Notconfigured / MagLinkNotConfigured | Notify only if the destination site folder did **not** exist before publication. Existing folder suppresses email, **even if empty**. Successful publication creates the folder, suppressing later arrivals. Removing the folder allows another first-arrival notification. |
+| Successful files, duplicate skips, busy-site lease skips, minimum-age skips | No email |
+| Dry runs, host-requested cancellation, temporary-directory cleanup warnings | No email |
+
+Every error event is queued immediately, with **no 15-minute cooldown and no digest batching**. Two background persistence workers write separate durable event blobs, and two background ACS senders send one email per event. A `Partial` archive produces one email containing its failed CSV diagnostics, rather than one per failed CSV. Another failed attempt of the same file generates another email. Normal successful file processing does not wait for mail delivery. Sending is queued, so ACS throughput, network delays and backlog still affect delivery time; "immediate" means no intentional batching delay, not guaranteed instant inbox delivery.
+
+The in-memory ingress queue holds up to 1,024 events and applies backpressure rather than silently dropping errors if it fills. The sender-ready queue holds 256 references; overflow stays in Blob Storage for discovery. Each event stores up to 6,000 diagnostic characters (first 20 failed CSV diagnostics collected per archive); full diagnostics remain in Function logs. Pending blobs in `fintech-etl-alerts/<app-and-slot-hash>/events/` under **AzureWebJobsStorage** are deleted after ACS acceptance. A finite per-event lease avoids simultaneous sends by multiple instances. Failed sends are retained and rediscovered on invocation startup and every minute during a long run. A short healthy invocation also performs startup recovery. On shutdown, queued events are persisted and senders receive a 30-second drain budget; unfinished persisted sends resume later.
+
+Storage persistence is attempted three times. If all attempts fail, the loss of durable email storage is explicitly logged; use Function logs for that event. Delivery is at least once: a timeout or crash after ACS acceptance but before deleting the event can cause a repeated email. ACS `Succeeded` means accepted/out for delivery, not proof of inbox delivery. A stopped/crashed host cannot send its own alert; Azure Monitor availability alerts are needed for that separate case. This implementation does not read the obsolete `EtlErrorEmailCooldownMinutes` setting; remove it from Azure if previously added.
+
+Add these settings to the **ETL** Function App environment (not the AutoSite app):
+
+- `ACS_EMAIL_CONNECTION_STRING`: ACS connection string (secret).
+- `EMAIL_FROM`: `fintechfuel@octopusdtl.com`.
+- `EMAIL_RECIPIENTS`: `kamran.khalid@octopusdtl.com,khurram.mir@octopusdtl.com,ujaved@avanceon.ae,usman.tariq@octopusdtl.com,ameer.hamza@octopusdtl.com`.
+- `EtlErrorEmailEnabled`: `true` (set `false` to disable).
+
+`AzureWebJobsStorage` must be an account-key connection string with permission to create/write the private alert container and acquire blob leases. Alerts do not require changes to the ETL SQL schema. The existing ignored `local.settings.json` and `azure-app-settings.local.json` are populated locally. **`etl-email-app-settings.local.json` contains only the four email settings**, so merge those into the current Azure environment without replacing database or other ETL settings. It is ignored by Git and excluded from publishing; secrets are not embedded in code or packages.
+
+To preview, build and run the DLL with `--preview-error-email`; it writes `artifacts/etl-error-email/Example-Email.html`. `--test-error-email` uses the same renderer and sends synthetic examples **only to usman.tariq@octopusdtl.com**, regardless of the production recipient setting. Neither command processes files or writes ETL SQL. `tests/FintechEtl.RegressionTests.csproj -- --email-outbox-check` checks real Blob outbox leasing, immediate individual sends, persistence and recovery with simulated send callbacks and removes its own test blob; it sends no email.

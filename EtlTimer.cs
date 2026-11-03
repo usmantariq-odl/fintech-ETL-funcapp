@@ -19,7 +19,21 @@ public sealed class EtlTimer
     public EtlTimer(ILogger<EtlTimer> logger) => this.logger = logger;
 
     [Function("FintechEtlTimer")]
-    public void Run([TimerTrigger("0 * * * * *", RunOnStartup = false)] TimerInfo timer, CancellationToken cancellationToken = default)
+    public void Run([TimerTrigger("0 * * * * *", RunOnStartup = false)] TimerInfo timer, CancellationToken cancellationToken = default, FunctionContext context = null)
+    {
+        using var alerts = new EtlErrorEmails(logger, context?.InvocationId ?? Guid.NewGuid().ToString("N"));
+        try { RunCore(timer, cancellationToken, alerts); }
+        catch (Exception) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            LastRunFailed = Math.Max(LastRunFailed, 1);
+            logger.LogError(ex, "ETL timer invocation failed before scan completion");
+            alerts.Report("InvocationFailure", null, null, "Run aborted; inspect file checkpoints and outputs before replay. Unfinished inputs are retried by a later run.", ex.ToString());
+            throw;
+        }
+    }
+
+    private void RunCore(TimerInfo timer, CancellationToken cancellationToken, EtlErrorEmails alerts)
     {
         LastRunFailed = 0;
         var settings = EtlSettings.Load();
@@ -77,7 +91,7 @@ public sealed class EtlTimer
                 var index = Interlocked.Increment(ref nextSite);
                 if (index >= sites.Length) break;
                 cancellationToken.ThrowIfCancellationRequested();
-                ProcessSite(worker, sites[index], settings, counters, maxFiles, localRun, watch, runBudget, cancellationToken);
+                ProcessSite(worker, sites[index], settings, counters, maxFiles, localRun, watch, runBudget, cancellationToken, alerts);
             }
         })).ToArray();
         Task.WaitAll(workers);
@@ -92,7 +106,7 @@ public sealed class EtlTimer
     }
 
     private void ProcessSite(WorkerState worker, string site, EtlSettings settings, RunCounters counters,
-        int maxFiles, bool localRun, Stopwatch watch, TimeSpan runBudget, CancellationToken cancellationToken)
+        int maxFiles, bool localRun, Stopwatch watch, TimeSpan runBudget, CancellationToken cancellationToken, EtlErrorEmails alerts)
     {
         var input = SftpLayout.Input(site);
         var sftp = worker.Sftp;
@@ -139,11 +153,14 @@ public sealed class EtlTimer
                             var invalid = MoveToArchive(sftp, item.FullName, "invalidFile", site, item.Name);
                             counters.IncrementInvalid();
                             logger.LogWarning("Invalid archive name {Input}; moved to {Destination}", item.FullName, invalid);
+                            alerts.Report("InvalidFilename", site, item.FullName, "Moved to " + invalid,
+                                "Archive name must match the exact input site ID followed by a valid timestamp and a supported archive extension.");
                         }
                         catch (Exception ex)
                         {
                             counters.IncrementFailed();
                             logger.LogError(ex, "Could not archive invalid archive {Path}; input remains for retry", item.FullName);
+                            alerts.Report("ArchiveMoveFailure", site, item.FullName, "Input remains for retry", ex.ToString());
                         }
                     }
                     continue;
@@ -163,6 +180,7 @@ public sealed class EtlTimer
                         MoveToArchive(sftp, item.FullName, candidate.MagLink ? "MagLinkException" : "ExceptionFile", site, item.Name);
                         counters.IncrementFailed();
                         logger.LogError("Input {Path} exceeds the file size limit; archived for investigation", item.FullName);
+                        alerts.Report("OversizedInput", site, item.FullName, "Moved to exception folder", $"Input bytes: {item.Length}; limit bytes: {ArchiveFiles.MaxTotalBytes}.");
                         continue;
                     }
                     var localArchive = Path.Combine(workDir, item.Name);
@@ -191,20 +209,45 @@ public sealed class EtlTimer
                         var exceptionPath = MoveToArchive(sftp, item.FullName, candidate.MagLink ? "MagLinkException" : "ExceptionFile", site, item.Name);
                         counters.IncrementFailed();
                         logger.LogError(ex, "ETL processing failed for {Input}; moved to {Destination}", item.FullName, exceptionPath);
+                        alerts.Report("FileProcessingFailure", site, item.FullName, "Moved to " + exceptionPath, ex.ToString());
                         if (localRun) Console.Error.WriteLine($"Failed {item.FullName}: {ex}");
                         continue;
                     }
 
                     cancellationToken.ThrowIfCancellationRequested();
                     lease?.Verify();
+                    // Folder existence is the notification marker, including empty site folders.
+                    // Check before publication creates the destination.
+                    var notifyNotConfigured = outcome.Result == EtlResult.NotConfigured
+                        && ShouldAlertNotConfigured(outcome.Outputs.Select(output => output.Folder), folder =>
+                        {
+                            return sftp.Exists($"/{folder}/{site}");
+                        });
                     ArchivePublisher.Publish(outcome, localArchive,
                         output => CopyToArchive(sftp, output.LocalPath, output.Folder, site, item.Name),
                         output => MoveToArchive(sftp, item.FullName, output.Folder, site, item.Name),
                         () => sftp.DeleteFile(item.FullName));
                     logger.LogInformation("{Result} {Input}; outputs: {Folders}", outcome.Result, item.FullName, string.Join(", ", outcome.Outputs.Select(o => o.Folder)));
                     if (localRun) Console.WriteLine($"{outcome.Result} {item.FullName}");
-                    if (outcome.Result == EtlResult.NotConfigured) counters.IncrementNotConfigured();
-                    else if (outcome.Result is EtlResult.Failed or EtlResult.Partial) counters.IncrementFailed();
+                    if (outcome.Result == EtlResult.NotConfigured)
+                    {
+                        counters.IncrementNotConfigured();
+                        if (notifyNotConfigured)
+                        {
+                            logger.LogWarning("New notconfigured folder for site {Site}: {Input}; queuing individual diagnostic email", site, item.FullName);
+                            alerts.Report("NotConfigured", site, item.FullName,
+                                "Moved to " + string.Join(", ", outcome.Outputs.Select(o => $"/{o.Folder}/{site}/")),
+                                "No active configured Omni site mapping was found for this FC site ID in the selected database. The destination site folder did not exist before this file was archived. Later arrivals are suppressed whenever that site folder already exists, including when it is empty. Verify the site activation and FC-to-Omni mapping before replay.");
+                        }
+                    }
+                    else if (outcome.Result is EtlResult.Failed or EtlResult.Partial)
+                    {
+                        counters.IncrementFailed();
+                        logger.LogError("Archive {Input} completed as {Result}; CSV errors: {Errors}", item.FullName, outcome.Result, string.Join("\n", outcome.Errors));
+                        alerts.Report(outcome.Result.ToString(), site, item.FullName,
+                            "Outputs published to " + string.Join(", ", outcome.Outputs.Select(o => o.Folder)) + "; input removed after publication. Inspect the exception subset before replay.",
+                            string.Join("\n\n", outcome.Errors));
+                    }
                     else
                     {
                         counters.IncrementProcessed();
@@ -215,6 +258,7 @@ public sealed class EtlTimer
                 {
                     counters.IncrementFailed();
                     logger.LogError(ex, "Could not finish {Path}; input remains for retry", item.FullName);
+                    alerts.Report("FileRetry", site, item.FullName, "Input remains for retry; database writes may already be committed. Replay uses content checkpoints and row duplicate checks.", ex.ToString());
                     if (localRun) Console.Error.WriteLine($"Failed {item.FullName}: {ex}");
                     if (ex is SshConnectionException || !sftp.IsConnected)
                     {
@@ -233,10 +277,14 @@ public sealed class EtlTimer
         {
             counters.IncrementFailed();
             logger.LogError(ex, "Could not scan site {Site}", site);
+            alerts.Report("SiteScanFailure", site, input, "Site scan stopped; remaining inputs will be retried", ex.ToString());
             if (localRun) Console.Error.WriteLine($"Could not scan site {site}: {ex}");
             if (ex is SshConnectionException || !sftp.IsConnected) ResetConnection(sftp);
         }
     }
+
+    internal static bool ShouldAlertNotConfigured(IEnumerable<string> folders, Func<string, bool> folderExists)
+        => !folders.Any(folderExists);
 
     private static SftpClient CreateSftp(EtlSettings settings, string username = null)
     {

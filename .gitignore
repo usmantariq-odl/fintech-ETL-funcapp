@@ -13,3 +13,4 @@ full-inventory.log
 publish/
 fintech-etl-net10.zip
 /artifacts
+etl-email-app-settings.local.json
