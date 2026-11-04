@@ -174,7 +174,7 @@ Covered cases:
 
 - Invalid CON filename/site ID moved to `Exception/Invalid_FC_SITE_ID`.
 - Malformed CON XML, mandatory-field/product/tank/pump/nozzle validation rejection, or configuration replacement/rollback failure moved to `Exception/<site>`.
-- No eligible site metadata/mapping: input is retained and an individual warning email is sent for each attempt. AutoSite has no `notconfigured` route or site-folder suppression rule.
+- No eligible site metadata/mapping: input is retained and a MissingSiteMapping email is sent only once per FC site, database and app/slot. A durable notification marker suppresses later files, repeated scans and queued duplicate notifications. AutoSite has no business `notconfigured` folder; the marker is in private alert storage.
 - Unexpected false replacement/status-update result.
 - SQL, SFTP, input-discovery, exception-sidecar/publication and timer invocation failures. Fatal storage failures carry the current remote input/site to the invocation-level notification so they are reported once, rather than also sending the legacy error email.
 
@@ -196,3 +196,12 @@ Pending alerts use individual private blobs under `fintech-autosite-alerts/<app-
 Storage persistence retries three times, then logs the failure explicitly. If the host dies before persistence, or storage stays unavailable, the email cannot be guaranteed. Shutdown persists queued events and allows 30 seconds to drain senders; pending stored events resume on a later invocation. Delivery is at least once: a timeout/crash between ACS acceptance and deletion can repeat an email. ACS `Succeeded` means accepted for delivery; network, backlog and ACS throughput affect actual arrival. A stopped host or startup validation failure before invocation requires a separate Azure Monitor availability alert.
 
 Build then run the application DLL with `--preview-error-email` to write `artifacts/autosite-error-email/Example-Email.html`. `--test-error-email` sends a synthetic template test only to **usman.tariq@octopusdtl.com**; neither command reads SQL or processes CON files. The regression suite covers parser error routing, preserved activation/rollback, remote path context, duplicate-error suppression and credential-safe HTML. `--email-outbox-check` on the regression test project uses a private temporary Blob scope to test immediate individual sending and recovery with simulated send callbacks; no mail or business data writes occur, and its test blobs are removed.
+
+
+### MissingSiteMapping notification suppression — 4 November 2026
+
+The first successfully accepted MissingSiteMapping email creates a `Sent=true` marker under `fintech-autosite-alerts/<app-and-slot-hash>/notified/missing-site/`. Its key includes the configured database and canonical numeric FC ID, so `001057` and `1057` are the same site while a different target database is a separate notification scope. The displayed email retains the original FC ID. Markers persist across deployments and restarts. A per-marker lease prevents concurrent instances from both notifying. Within an invocation, repeated files for the same missing site are also coalesced before entering the outbox.
+
+Notification failure leaves the marker unsent and its event pending, allowing a later successful email. Existing queued MissingSiteMapping events go through the same marker check; after one succeeds the remaining duplicates are deleted without email. Historical emails sent before this feature have no marker, so the first post-deployment notification may send once before future notifications are suppressed. No live markers were pre-seeded.
+
+CON files remain in their existing input folders and every scan still checks current database metadata. No SQL mappings, activation state or business routing are changed by suppression. Once notified, the marker has no automatic expiry; the same site/database will not notify again unless its specific marker is explicitly reset. Other error categories keep their existing notification behavior. An ACS acceptance followed by a host/storage failure before writing the marker still has the usual at-least-once delivery limitation.

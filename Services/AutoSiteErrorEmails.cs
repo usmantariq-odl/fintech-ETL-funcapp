@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
+using System.Collections.Concurrent;
 using Azure;
 using Azure.Communication.Email;
 using Azure.Storage.Blobs;
@@ -33,6 +34,7 @@ internal sealed class AlertDigest
 // Separate persistence and ACS workers: an error wakes the sender immediately, without a digest interval.
 internal sealed class AutoSiteErrorEmails : IDisposable
 {
+    private readonly ConcurrentDictionary<string, byte> missingSitesThisRun = new(StringComparer.Ordinal);
     private readonly ILogger log;
     private readonly string runId;
     private readonly string connection;
@@ -73,6 +75,7 @@ internal sealed class AutoSiteErrorEmails : IDisposable
         if (!enabled) return;
         var item = new EtlAlert(category, site, file, disposition, Redact(detail), runId, DateTimeOffset.UtcNow,
             DatabaseName(), Environment.GetEnvironmentVariable("SftpHost"));
+        if (category == "MissingSiteMapping" && !missingSitesThisRun.TryAdd(MissingMappingMarkerName(prefix, site, item.Database), 0)) return;
         // Bounded backpressure only during a very large error storm; never silently discard events.
         incoming.Writer.WriteAsync(item).AsTask().GetAwaiter().GetResult();
     }
@@ -165,9 +168,12 @@ internal sealed class AutoSiteErrorEmails : IDisposable
                         var item = (await blob.DownloadContentAsync(ct)).Value.Content.ToObjectFromJson<EtlAlert>();
                         var message = new AlertDigest(); message.Add(item);
                         var body = Render(message, app, false);
-                        var operation = await sender(Recipients(), body.Subject, body.Text, body.Html, ct);
+                        var delivery = await SendOnceIfNeeded(item, body, ct);
+                        if (!delivery.RemoveEvent) continue; // Another instance owns this site's notification; recover later.
                         await blob.DeleteAsync(conditions: new BlobRequestConditions { LeaseId = lease.LeaseId }, cancellationToken: ct);
-                        log.LogInformation("Individual AutoSite error email accepted by ACS: operation {OperationId}, category {Category}, site {Site}, file {File}", operation, item.Category, item.Site, item.File);
+                        if (delivery.Operation != null)
+                            log.LogInformation("Individual AutoSite error email accepted by ACS: operation {OperationId}, category {Category}, site {Site}, file {File}", delivery.Operation, item.Category, item.Site, item.File);
+                        else log.LogInformation("Suppressed repeated MissingSiteMapping email for site {Site}; already notified", item.Site);
                     }
                     finally
                     {
@@ -179,6 +185,46 @@ internal sealed class AutoSiteErrorEmails : IDisposable
             }
         }
         catch (OperationCanceledException) when (stopSending.IsCancellationRequested) { }
+    }
+
+    internal static string MissingMappingMarkerName(string eventPrefix, string site, string database)
+    {
+        // FC identifiers are numeric; 001057 and 1057 identify the same missing mapping.
+        var normalized = (site ?? "unknown").TrimStart('0');
+        if (normalized.Length == 0) normalized = "0";
+        var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes((database ?? "") + "|" + normalized))).ToLowerInvariant();
+        return eventPrefix[..eventPrefix.LastIndexOf("/events/", StringComparison.Ordinal)] + "/notified/missing-site/" + identity + ".json";
+    }
+
+    private async Task<(bool RemoveEvent, string Operation)> SendOnceIfNeeded(EtlAlert item,
+        (string Subject, string Text, string Html) body, CancellationToken ct)
+    {
+        if (item.Category != "MissingSiteMapping")
+            return (true, await sender(Recipients(), body.Subject, body.Text, body.Html, ct));
+        var marker = Container().GetBlobClient(MissingMappingMarkerName(prefix, item.Site, item.Database));
+        try { await marker.UploadAsync(BinaryData.FromObjectAsJson(new { Sent = false }), overwrite: false, cancellationToken: ct); }
+        catch (RequestFailedException ex) when (ex.Status is 409 or 412) { /* Existing marker, possibly leased by another sender. */ }
+        // A successful marker is immutable; common suppression requires no lease contention.
+        using (var known = JsonDocument.Parse((await marker.DownloadContentAsync(ct)).Value.Content))
+            if (known.RootElement.GetProperty("Sent").GetBoolean()) return (true, null);
+        var lease = marker.GetBlobLeaseClient();
+        try { await lease.AcquireAsync(TimeSpan.FromSeconds(60), cancellationToken: ct); }
+        catch (RequestFailedException ex) when (ex.Status == 409) { return (false, null); }
+        try
+        {
+            using var saved = JsonDocument.Parse((await marker.DownloadContentAsync(ct)).Value.Content);
+            if (saved.RootElement.GetProperty("Sent").GetBoolean()) return (true, null);
+            var operation = await sender(Recipients(), body.Subject, body.Text, body.Html, ct);
+            // Mark notified only after ACS acceptance. A failed send remains eligible for retry.
+            await marker.UploadAsync(BinaryData.FromObjectAsJson(new { Sent = true, Site = item.Site, Database = item.Database, NotifiedUtc = DateTimeOffset.UtcNow }),
+                new BlobUploadOptions { Conditions = new BlobRequestConditions { LeaseId = lease.LeaseId } }, ct);
+            return (true, operation);
+        }
+        finally
+        {
+            try { using var release = new CancellationTokenSource(TimeSpan.FromSeconds(3)); await lease.ReleaseAsync(cancellationToken: release.Token); }
+            catch { /* The finite lease expires if release is interrupted. */ }
+        }
     }
 
     private void Failure(string stage, Exception ex)
