@@ -33,7 +33,7 @@ if (args.Contains("--live-provisioning-check"))
 }
 
 var log = LogManager.GetLogger("RegressionTests");
-int passed = SqlBatchChecks.Run();
+int passed = SqlBatchChecks.Run() + SftpRecoveryChecks.Run();
 void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
 void Throws<T>(Action action) where T : Exception
 {
@@ -776,6 +776,17 @@ Test("Transient SQL failure retains archive and recovers on the next attempt", r
     var retryDirectory = Path.Combine(root, "retry-after-timeout"); Directory.CreateDirectory(retryDirectory);
     var retryArchive = Path.Combine(retryDirectory, Path.GetFileName(archive)); File.Copy(archive, retryArchive);
     Check(processor.ProcessArchive(retryArchive, "/input/temporary.zip", "600005", _ => { }).Result == EtlResult.Processed && backend.Committed == 1, "Transient failure did not recover normally.");
+});
+Test("SFTP publication reconnects after SQL commit without repeating CSV writes", root =>
+{
+    var archive=Make(root,".zip",("PSL.csv","data"));var backend=new FakeBackend();
+    var outcome=new FtpConnectivity(log,backend).ProcessArchive(archive,"/Unprocessed/600005/input/test.zip","600005",_=>{});
+    var sqlCalls=backend.Calls.Count;bool connected=true,ready=false,moved=false;int probes=0;
+    SftpSessionRecovery.EnsureReady(()=>connected,()=>{connected=true;ready=true;},
+        ()=>{if(++probes==1)throw SftpRecoveryChecks.Closed();},()=>connected=false,delay:_=>{});
+    ArchivePublisher.Publish(outcome,archive,_=>throw new Exception("Unexpected copy."),
+        _=>{Check(ready,"Moved before restoring SFTP.");moved=true;},()=>throw new Exception("Unexpected delete."));
+    Check(moved && backend.Calls.Count==sqlCalls && backend.Committed==1,"Connection recovery replayed committed CSV work.");
 });
 Console.WriteLine($"{passed} regression scenarios passed. No SQL/SFTP connections or live writes were made.");
 

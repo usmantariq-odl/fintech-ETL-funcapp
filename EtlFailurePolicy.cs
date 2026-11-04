@@ -19,7 +19,8 @@ internal static class EtlFailurePolicy
         if (error is AggregateException aggregate) return aggregate.Flatten().InnerExceptions.Any(ShouldEmail);
         if (error is SqlException sql) return !IsRetryableSql(sql)
             || sql.Errors.Cast<SqlError>().Any(item => item.Number is 18456 or 18452 or 229 or 916 or 4060 or 102 or 156 or 207 or 208 or 2812 or 201 or 8144 or 8145);
-        if (error is SshAuthenticationException or UnauthorizedAccessException) return true;
+        if (error is SshAuthenticationException or SftpPermissionDeniedException or UnauthorizedAccessException) return true;
+        if (SftpSessionRecovery.IsTransient(error)) return false;
         if (error is RetryableEtlException or TransactionException)
             return error.InnerException != null && ShouldEmail(error.InnerException);
         if (error is OperationCanceledException or TimeoutException or IOException or SshException) return false;

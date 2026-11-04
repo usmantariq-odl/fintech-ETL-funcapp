@@ -253,6 +253,8 @@ Production sign-off still requires a controlled end-to-end test of uploads/routi
 
 ## ETL error email alerts (ACS)
 
+After long SQL work, the worker now probes the SFTP subsystem before archive-folder checks, publication and input removal. `IsConnected` alone is insufficient when SSH remains connected but its SFTP channel has closed. Transient failures disconnect and reconnect with up to three attempts and short backoff. If recovery still fails, input remains for the next scan and committed CSV checkpoints are retained. A disconnect after the probe is also retryable; archive rename ambiguity handling remains unchanged. SSH.NET's specific `The session is not open.` exception is log-only; unrelated application exceptions and authentication/permission failures still notify. No archive copy/move is blindly replayed as a group, so recovery does not bypass publication ordering or delete an unpublished input.
+
 The ETL timer sends an individual dark, table-based HTML error notification with a plain-text alternative. It includes event counts, site ID (leading zeros preserved), input path, routing/retry disposition, UTC and Pakistan timestamps, invocation ID, configured SQL database, SFTP host and redacted exception/stack details. Per-CSV failures are included for `Partial` / `Failed` archives; the full errors also remain in Function logs.
 
 | Case | Email behavior |

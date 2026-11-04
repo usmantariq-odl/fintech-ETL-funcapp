@@ -217,6 +217,9 @@ public sealed class EtlTimer
                     cancellationToken.ThrowIfCancellationRequested();
                     lease?.Verify();
                     // Folder existence is the notification marker, including empty site folders.
+                    // SQL work can outlast the SFTP session; verify the subsystem
+                    // before any existence check, copy, move or input deletion.
+                    EnsureConnected(sftp);
                     // Check before publication creates the destination.
                     var notifyNotConfigured = outcome.Result == EtlResult.NotConfigured
                         && ShouldAlertNotConfigured(outcome.Outputs.Select(output => output.Folder), folder =>
@@ -260,7 +263,7 @@ public sealed class EtlTimer
                     logger.LogError(ex, "Could not finish {Path}; input remains for retry", item.FullName);
                     if (EtlFailurePolicy.ShouldEmail(ex)) alerts.Report("ProcessingRequiresIntervention", site, item.FullName, "Input remains for retry; database writes may already be committed. Replay uses content checkpoints and row duplicate checks.", ex.ToString());
                     if (localRun) Console.Error.WriteLine($"Failed {item.FullName}: {ex}");
-                    if (ex is SshConnectionException || !sftp.IsConnected)
+                    if (SftpSessionRecovery.IsTransient(ex) || !sftp.IsConnected)
                     {
                         ResetConnection(sftp);
                         break; // Retry this site's remaining ZIPs on the next timer run.
@@ -279,7 +282,7 @@ public sealed class EtlTimer
             logger.LogError(ex, "Could not scan site {Site}", site);
             if (EtlFailurePolicy.ShouldEmail(ex)) alerts.Report("SiteScanFailure", site, input, "Site scan stopped; remaining inputs will be retried", ex.ToString());
             if (localRun) Console.Error.WriteLine($"Could not scan site {site}: {ex}");
-            if (ex is SshConnectionException || !sftp.IsConnected) ResetConnection(sftp);
+            if (SftpSessionRecovery.IsTransient(ex) || !sftp.IsConnected) ResetConnection(sftp);
         }
     }
 
@@ -304,7 +307,9 @@ public sealed class EtlTimer
 
     private static void EnsureConnected(SftpClient sftp)
     {
-        if (!sftp.IsConnected) sftp.Connect();
+        SftpSessionRecovery.EnsureReady(() => sftp.IsConnected, sftp.Connect,
+            () => { _ = sftp.Exists("/"); }, () => ResetConnection(sftp),
+            (attempt, error) => LegacyLog.Warn($"Restoring SFTP session after temporary connection failure (attempt {attempt}/3): {error.GetType().Name}"));
     }
 
     private static void ResetConnection(SftpClient sftp)
