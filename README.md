@@ -199,6 +199,26 @@ Live runs validate required schema objects and sequential connection enlistment 
 
 Archive extraction rejects traversal, duplicate paths, links and special files. Limits: 1,000 entries, 100 MB per entry, 250 MB total extracted data and 250 MB compressed input. Input must remain unchanged during download. Producers should upload under a temporary name and atomically rename to the final name. Outputs also use temporary uploads and rename. Archive and CON publication is at least once: a crash after delivery can preserve an extra duplicate copy, while CSV SQL checkpoints prevent duplicate committed inserts. Downstream CON consumers must tolerate redelivery.
 
+## Large transaction CSVs
+
+PSL transaction inserts use batches of 1,000 rows on one SQL connection. The existing stored procedure, value conversions, Site_ID/Sale_ID duplicate rules and archive ProcessedFileID are preserved. Short CSV strings use bounded TVP metadata instead of advertising every field as nvarchar(max); genuine long fields remain untruncated. Existing-sale lookups use a hash set. Duplicate CSV records are still written, with one summary log instead of a message for every row.
+
+Every SQL batch logs progress as **sent, awaiting CSV transaction commit**. All batches and the content checkpoint remain in one CSV transaction: any failed batch rolls back all new rows from that CSV. Earlier successful CSVs retain their existing independent commit behavior. This does not create partially committed chunks or mark an unfinished CSV Processed.
+
+Optional Azure environment settings (defaults work without adding them):
+
+| Setting | Default | Allowed range |
+|---|---|---|
+| `EtlSqlBatchSize` | `1000` | 1–5000 rows per transaction insert call |
+| `EtlSqlCommandTimeoutSeconds` | `120` | 1–300 seconds per transaction insert call |
+| `EtlCsvTransactionTimeoutSeconds` | `600` | 30–600 seconds for the whole CSV transaction |
+
+The CSV timeout must fit the host's System.Transactions maximum; an unsupported value fails explicitly instead of being silently shortened. The default replaces the earlier three-minute CSV limit. A saturated database can still time out; these settings do not provide unlimited retries or additional SQL capacity. No database schema/stored-procedure changes are needed. Deploy this main-branch build to apply the change; existing retry inputs are picked up automatically.
+
+An opt-in `--large-csv-sql-check --fixture <archive.zip>` mode in the regression test project checks the actual PSL fixture and the configured database's transaction procedure conversion body against session-local temporary tables. It verifies later-batch SQL failure rollback, successful row counts/volumes/site/archive references and the atomic checkpoint. It does not write application tables, alter persistent schema, publish archives or send email. Its heap-table timing is diagnostic and does not predict production indexed-table throughput.
+
+Verification on 4 November 2026: 96 offline regressions passed. The original `60000020260514171241.zip` fixture inserted all 572,165 source rows in 573 batches into temporary SQL tables, verified 2,675,973.800000 litres, correct site/archive references and its committed checkpoint. SQL insertion plus verification took 177.8 seconds. An injected SQL failure after an earlier successful batch left zero rows and zero completion checkpoints. These checks did not replay or alter the live archive. Deployment is still required.
+
 ## Build and checks
 
 Use the installed .NET 10 SDK. From this repository:

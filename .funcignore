@@ -3,6 +3,9 @@
 bin/
 obj/
 publish/
+artifacts/
+tests/
+*.local.json
 backlog-runs/
 *.log
 *.zip

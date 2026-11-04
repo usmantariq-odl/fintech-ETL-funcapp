@@ -94,7 +94,7 @@ namespace CSVReader
         /// <summary>
         /// Safely writes duplicate records to CSV file with error handling
         /// </summary>
-        private void WriteDuplicateToCSV(string fileName, string data, string recordType)
+        private void WriteDuplicateToCSV(string fileName, string data, string recordType, bool logEachRecord = true)
         {
             try
             {
@@ -106,7 +106,7 @@ namespace CSVReader
                         sw.WriteLine(data);
                     }
                 }
-                logger.Info($"Duplicate {recordType} record written to {fileName}");
+                if (logEachRecord) logger.Info($"Duplicate {recordType} record written to {fileName}");
             }
             catch (IOException ioEx)
             {
@@ -369,7 +369,8 @@ namespace CSVReader
             transactions.Columns[15].DataType = typeof(System.String);
 
             logger.Info("getting sale ids");
-            List<int> saleids = getSaleIDs(Convert.ToInt32(OmniSiteId), Convert.ToInt32(dt.Rows[0][1]), Convert.ToInt32(dt.Rows[dt.Rows.Count - 1][1]));
+            var saleids = getSaleIDs(Convert.ToInt32(OmniSiteId), Convert.ToInt32(dt.Rows[0][1]), Convert.ToInt32(dt.Rows[dt.Rows.Count - 1][1])).ToHashSet();
+            int duplicates = 0;
             int SaleId;
             DateTime FC_StartDateTime;
             DateTime FC_EndDateTime;
@@ -425,14 +426,13 @@ namespace CSVReader
                 }
                 else
                 {
-                    Console.WriteLine("Sale ID " + Convert.ToString(SaleId) + " already exists. Duplicate");
-                    logger.Warn("Duplicate Transaction Row Found for Sale Id" + SaleId);
+                    duplicates++;
 
                     var line = $"{OmniSiteId},{dataRow[1]},{dataRow[2]},{dataRow[3]},{dataRow[4]},{dataRow[5]},{dataRow[6]}," +
                         $"{dataRow[7]},{dataRow[8]},{dataRow[9]},{dataRow[10]},{dataRow[11]},{dataRow[12]},{dataRow[13]},{dataRow[14]},{dataRow[15]}," +
                         $"{dataRow[16]},{dataRow[17]},{dataRow[18]},{DateTime.Now.AddHours(5)},{""},{""},{""},{Article},{""},{FintechSiteId},{FC_StartDateTime},{FC_EndDateTime}";
 
-                    WriteDuplicateToCSV("duplicateTransactions.csv", line, "Transaction");
+                    WriteDuplicateToCSV("duplicateTransactions.csv", line, "Transaction", logEachRecord: false);
 
                     //dt.Rows.Remove(dt.Rows[i]);INSE
 
@@ -442,6 +442,7 @@ namespace CSVReader
 
             }
 
+            logger.Info($"Transactions prepared for archive {processedFileId}: {dt.Rows.Count} source rows, {transactions.Rows.Count} pending rows, {duplicates} existing-sale duplicates skipped (details in duplicateTransactions.csv).");
             if (transactions.Rows.Count > 0)
             {
                 logger.Info("Starting Bulk Insert for Transactions");
@@ -473,11 +474,12 @@ namespace CSVReader
                     using (SqlConnection con = new SqlConnection(connectToDb))
                         {
                             con.Open();
-                            SqlCommand cmd = new SqlCommand("InsertintoFintechTransactions", con);
-                            cmd.CommandType = CommandType.StoredProcedure;
-                            cmd.Parameters.Add("@TransactionsTable", SqlDbType.Structured).Value = dt;
-                            cmd.Parameters.Add("@ProcessedFileID", SqlDbType.Int).Value = processedFileId.HasValue ? (object)processedFileId.Value : DBNull.Value;
-                            cmd.ExecuteNonQuery();
+                            var options = SqlWriteOptions.Load();
+                            SqlTransactionBatches.Execute(dt, processedFileId, options, (batch, id) =>
+                            {
+                                using var cmd = SqlTransactionBatches.CreateCommand(con, batch, id, options);
+                                cmd.ExecuteNonQuery();
+                            }, (completed, total) => logger.Info($"Transaction SQL batches for archive {processedFileId}: {completed}/{total} rows sent; awaiting CSV transaction commit."));
                             logger.Info("Primary DB - Transactions inserted successfully");
                         }
                     

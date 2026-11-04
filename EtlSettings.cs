@@ -65,6 +65,7 @@ internal sealed class EtlSettings
         if (conDestinations.Length > 0 && string.IsNullOrWhiteSpace(conUsername))
             throw new InvalidOperationException("ConSftpUsername must explicitly select the CON container when CON destinations are configured.");
 
+        _ = SqlWriteOptions.Load(); // Reject invalid SQL tuning before scanning or routing files.
         return new EtlSettings
         {
             Host = Environment.GetEnvironmentVariable("SftpHost") ?? "fintechsftpdata.blob.core.windows.net",

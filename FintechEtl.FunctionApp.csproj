@@ -8,11 +8,14 @@
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="deployment/Create-EtlFileCheckpoints.sql" />
-    <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="tests/**/*.cs;artifacts/**/*.cs" />
+    <None Remove="artifacts/**;tests/**" />
+    <Content Remove="artifacts/**;tests/**" />
     <InternalsVisibleTo Include="FintechEtl.RegressionTests" />
     <None Update="etl-email-app-settings.local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <None Update="local.settings.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <None Update="azure-app-settings.local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+    <None Update="*.local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.50.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Sdk" Version="2.0.5" OutputItemType="Analyzer" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Timer" Version="4.3.1" />

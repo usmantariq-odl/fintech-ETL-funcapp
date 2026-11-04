@@ -7,9 +7,15 @@ internal static class EtlTransaction
 {
     // Sequential connections with the same connection string reuse the enlisted SQL session.
     // Keep one CSV's writes and its completion checkpoint in the same transaction.
-    public static TransactionScope Begin() => new(TransactionScopeOption.Required,
-        new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted, Timeout = TimeSpan.FromMinutes(3) },
-        TransactionScopeAsyncFlowOption.Enabled);
+    public static TransactionScope Begin()
+    {
+        var timeout = TimeSpan.FromSeconds(SqlWriteOptions.Load().CsvTransactionTimeoutSeconds);
+        if (timeout > TransactionManager.MaximumTimeout)
+            throw new InvalidOperationException("EtlCsvTransactionTimeoutSeconds exceeds this host's transaction maximum.");
+        return new(TransactionScopeOption.Required,
+            new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted, Timeout = timeout },
+            TransactionScopeAsyncFlowOption.Enabled);
+    }
 
     public static void VerifyConnectionReuse(string connectionString)
     {

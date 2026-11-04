@@ -20,6 +20,12 @@ if (args.Contains("--checkpoint-sql-check"))
     return;
 }
 
+if (args.Contains("--large-csv-sql-check"))
+{
+    LiveSqlBatchCheck.Run(args);
+    return;
+}
+
 if (args.Contains("--live-provisioning-check"))
 {
     await LiveProvisioningCheck.Run();
@@ -27,7 +33,7 @@ if (args.Contains("--live-provisioning-check"))
 }
 
 var log = LogManager.GetLogger("RegressionTests");
-int passed = 0;
+int passed = SqlBatchChecks.Run();
 void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
 void Throws<T>(Action action) where T : Exception
 {
