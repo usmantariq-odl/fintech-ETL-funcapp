@@ -28,7 +28,7 @@ public sealed class EtlTimer
         {
             LastRunFailed = Math.Max(LastRunFailed, 1);
             logger.LogError(ex, "ETL timer invocation failed before scan completion");
-            alerts.Report("InvocationFailure", null, null, "Run aborted; inspect file checkpoints and outputs before replay. Unfinished inputs are retried by a later run.", ex.ToString());
+            if (EtlFailurePolicy.ShouldEmail(ex)) alerts.Report("InvocationFailure", null, null, "Run aborted; inspect file checkpoints and outputs before replay. Unfinished inputs are retried by a later run.", ex.ToString());
             throw;
         }
     }
@@ -160,7 +160,7 @@ public sealed class EtlTimer
                         {
                             counters.IncrementFailed();
                             logger.LogError(ex, "Could not archive invalid archive {Path}; input remains for retry", item.FullName);
-                            alerts.Report("ArchiveMoveFailure", site, item.FullName, "Input remains for retry", ex.ToString());
+                            if (EtlFailurePolicy.ShouldEmail(ex)) alerts.Report("ArchiveMoveFailure", site, item.FullName, "Input remains for retry", ex.ToString());
                         }
                     }
                     continue;
@@ -258,7 +258,7 @@ public sealed class EtlTimer
                 {
                     counters.IncrementFailed();
                     logger.LogError(ex, "Could not finish {Path}; input remains for retry", item.FullName);
-                    alerts.Report("FileRetry", site, item.FullName, "Input remains for retry; database writes may already be committed. Replay uses content checkpoints and row duplicate checks.", ex.ToString());
+                    if (EtlFailurePolicy.ShouldEmail(ex)) alerts.Report("ProcessingRequiresIntervention", site, item.FullName, "Input remains for retry; database writes may already be committed. Replay uses content checkpoints and row duplicate checks.", ex.ToString());
                     if (localRun) Console.Error.WriteLine($"Failed {item.FullName}: {ex}");
                     if (ex is SshConnectionException || !sftp.IsConnected)
                     {
@@ -277,7 +277,7 @@ public sealed class EtlTimer
         {
             counters.IncrementFailed();
             logger.LogError(ex, "Could not scan site {Site}", site);
-            alerts.Report("SiteScanFailure", site, input, "Site scan stopped; remaining inputs will be retried", ex.ToString());
+            if (EtlFailurePolicy.ShouldEmail(ex)) alerts.Report("SiteScanFailure", site, input, "Site scan stopped; remaining inputs will be retried", ex.ToString());
             if (localRun) Console.Error.WriteLine($"Could not scan site {site}: {ex}");
             if (ex is SshConnectionException || !sftp.IsConnected) ResetConnection(sftp);
         }

@@ -163,6 +163,13 @@ internal sealed class EtlErrorEmails : IDisposable
                     try
                     {
                         var item = (await blob.DownloadContentAsync(ct)).Value.Content.ToObjectFromJson<EtlAlert>();
+                        if (item.Category == "FileRetry")
+                        {
+                            // Drain notifications queued by the old policy without mailing routine retries.
+                            await blob.DeleteAsync(conditions: new BlobRequestConditions { LeaseId = lease.LeaseId }, cancellationToken: ct);
+                            log.LogInformation("Suppressed legacy FileRetry email for {File}; retry diagnostics remain in Function logs", item.File);
+                            continue;
+                        }
                         var message = new AlertDigest(); message.Add(item);
                         var body = Render(message, app, false);
                         var operation = await sender(Recipients(), body.Subject, body.Text, body.Html, ct);

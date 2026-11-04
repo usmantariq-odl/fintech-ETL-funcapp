@@ -20,7 +20,7 @@ Destinations at the SFTP container root:
 | Filename does not begin with its site folder ID | `/invalidFile/<site ID>/<original name>` |
 | MagLink success / inactive site / data error | `/MagLinkProcessed/<site ID>/`, `/MagLinkNotConfigured/<site ID>/`, `/MagLinkException/<site ID>/` |
 
-Partial-result archives retain their original extension and nested CSV paths. Input is deleted only after both filtered archives are published. An existing archive destination is preserved; subsequent versions go under `duplicate`. SQL, local I/O, CON delivery and SFTP failures leave input for retry. Regenerated files require a 14-digit `yyyyMMddHHmmss` timestamp immediately after the site ID; hourly recalculation uses the mapped Omni site and timestamp ±1 hour. The timestamp is validated before inserting rows.
+Partial-result archives retain their original extension and nested CSV paths. Input is deleted only after both filtered archives are published. An existing archive destination is preserved; subsequent versions go under `duplicate`. Transient SQL, local I/O, CON delivery and SFTP failures leave input for retry. Deterministic SQL data failures (including truncation 2628/8152) fail the affected CSV and produce Partial/Failed exception outputs. Regenerated files require a 14-digit `yyyyMMddHHmmss` timestamp immediately after the site ID; hourly recalculation uses the mapped Omni site and timestamp ±1 hour. The timestamp is validated before inserting rows.
 
 The requested container layout is:
 
@@ -237,9 +237,9 @@ The ETL timer sends an individual dark, table-based HTML error notification with
 
 | Case | Email behavior |
 |---|---|
-| Timer/configuration/SQL schema or discovery failure | InvocationFailure; original invocation still fails |
-| Site connection/scan/lease failure | SiteScanFailure |
-| File download/SQL/CON delivery/publication failure retained for retry | FileRetry, with actual exception |
+| Permanent timer/configuration/SQL schema failure | InvocationFailure; original invocation still fails; transient failures are log-only |
+| Site connection/scan/lease failure | Routine temporary failures are log-only; credential/configuration failures notify |
+| File download/SQL/CON delivery/publication failure retained for retry | Routine retries are log-only. Known permanent permission/configuration failures notify as ProcessingRequiresIntervention. |
 | File moved to ExceptionFile / MagLinkException | FileProcessingFailure or Failed / Partial; includes failing CSV diagnostics where available |
 | Oversized input moved to exception | OversizedInput |
 | Invalid archive name moved to invalidFile | InvalidFilename; failed move is ArchiveMoveFailure |
@@ -247,7 +247,7 @@ The ETL timer sends an individual dark, table-based HTML error notification with
 | Successful files, duplicate skips, busy-site lease skips, minimum-age skips | No email |
 | Dry runs, host-requested cancellation, temporary-directory cleanup warnings | No email |
 
-Every error event is queued immediately, with **no 15-minute cooldown and no digest batching**. Two background persistence workers write separate durable event blobs, and two background ACS senders send one email per event. A `Partial` archive produces one email containing its failed CSV diagnostics, rather than one per failed CSV. Another failed attempt of the same file generates another email. Normal successful file processing does not wait for mail delivery. Sending is queued, so ACS throughput, network delays and backlog still affect delivery time; "immediate" means no intentional batching delay, not guaranteed instant inbox delivery.
+Every actionable permanent failure event is queued immediately, with **no 15-minute cooldown and no digest batching**. Two background persistence workers write separate durable event blobs, and two background ACS senders send one email per event. A `Partial` archive produces one email containing its failed CSV diagnostics, rather than one per failed CSV. Routine retries do not email. Files routed to exception or Partial outputs still notify immediately; another explicit replay ending in a permanent failure can notify again. Normal successful file processing does not wait for mail delivery. Sending is queued, so ACS throughput, network delays and backlog still affect delivery time; "immediate" means no intentional batching delay, not guaranteed instant inbox delivery.
 
 The in-memory ingress queue holds up to 1,024 events and applies backpressure rather than silently dropping errors if it fills. The sender-ready queue holds 256 references; overflow stays in Blob Storage for discovery. Each event stores up to 6,000 diagnostic characters (first 20 failed CSV diagnostics collected per archive); full diagnostics remain in Function logs. Pending blobs in `fintech-etl-alerts/<app-and-slot-hash>/events/` under **AzureWebJobsStorage** are deleted after ACS acceptance. A finite per-event lease avoids simultaneous sends by multiple instances. Failed sends are retained and rediscovered on invocation startup and every minute during a long run. A short healthy invocation also performs startup recovery. On shutdown, queued events are persisted and senders receive a 30-second drain budget; unfinished persisted sends resume later.
 
@@ -263,3 +263,10 @@ Add these settings to the **ETL** Function App environment (not the AutoSite app
 `AzureWebJobsStorage` must be an account-key connection string with permission to create/write the private alert container and acquire blob leases. Alerts do not require changes to the ETL SQL schema. The existing ignored `local.settings.json` and `azure-app-settings.local.json` are populated locally. **`etl-email-app-settings.local.json` contains only the four email settings**, so merge those into the current Azure environment without replacing database or other ETL settings. It is ignored by Git and excluded from publishing; secrets are not embedded in code or packages.
 
 To preview, build and run the DLL with `--preview-error-email`; it writes `artifacts/etl-error-email/Example-Email.html`. `--test-error-email` uses the same renderer and sends synthetic examples **only to usman.tariq@octopusdtl.com**, regardless of the production recipient setting. Neither command processes files or writes ETL SQL. `tests/FintechEtl.RegressionTests.csproj -- --email-outbox-check` checks real Blob outbox leasing, immediate individual sends, persistence and recovery with simulated send callbacks and removes its own test blob; it sends no email.
+
+
+### Permanent failures only — 4 November 2026
+
+Routine FileRetry, transient SQL timeouts/deadlocks/throttling, temporary I/O/SFTP disconnections and transient invocation/site-scan failures remain in Function logs without email. Old pending FileRetry notification blobs are discarded without mailing when recovered. Permanent file validation failures and Partial/Failed exception outputs still notify immediately. The existing first-notconfigured-folder notification remains enabled. Known authentication, permission and SQL configuration failures also notify because operator intervention is required.
+
+SQL truncation (2628/8152), numeric/date conversion/overflow and required-field/foreign-key data failures are now nonretryable for the affected CSV. Earlier successfully committed CSVs remain committed and the archive is classified Partial when applicable. Unknown SQL errors remain retryable conservatively to avoid quarantining files because of an unrecognized infrastructure problem. No automatic alert escalation threshold is added for prolonged transient outages; use Function/Azure Monitor logs and availability monitoring. This change does not alter database column sizes.

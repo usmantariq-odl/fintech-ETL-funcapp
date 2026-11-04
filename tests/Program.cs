@@ -726,6 +726,51 @@ Test("Notconfigured alert depends on destination folder existence, including emp
     Check(!EtlTimer.ShouldAlertNotConfigured(["notconfigured"], _ => true), "Existing site folder must suppress notification even if empty.");
     Check(!EtlTimer.ShouldAlertNotConfigured(["MagLinkNotConfigured"], _ => true), "MagLink destination should use the same suppression rule.");
 });
+System.Data.SqlClient.SqlException SqlFailure(int number)
+{
+    const System.Reflection.BindingFlags hidden = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+    var errors = (System.Data.SqlClient.SqlErrorCollection)Activator.CreateInstance(typeof(System.Data.SqlClient.SqlErrorCollection), true);
+    var constructor = typeof(System.Data.SqlClient.SqlError).GetConstructors(hidden).First();
+    var args = constructor.GetParameters().Select(p => p.Name is "infoNumber" ? (object)number : p.ParameterType == typeof(string) ? "Synthetic SQL error" : p.ParameterType.IsValueType ? Activator.CreateInstance(p.ParameterType) : null).ToArray();
+    var error = constructor.Invoke(args);
+    typeof(System.Data.SqlClient.SqlErrorCollection).GetMethod("Add", hidden).Invoke(errors, [error]);
+    return (System.Data.SqlClient.SqlException)typeof(System.Data.SqlClient.SqlException).GetMethod("CreateException", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic, null, [typeof(System.Data.SqlClient.SqlErrorCollection), typeof(string)], null).Invoke(null, [errors, "16.0"]);
+}
+Test("Transient retries do not email, permanent SQL payload failures do", root =>
+{
+    foreach (var number in new[] { -2, 1205, 40501, 40197, 40613, 10053, 10054 })
+    {
+        var error = SqlFailure(number);
+        Check(FtpConnectivity.IsRetryable(error) && !EtlFailurePolicy.ShouldEmail(error), "Transient SQL failure would send an email or be routed to exception.");
+    }
+    foreach (var number in new[] { 2628, 8152, 245, 8115, 515, 547 })
+    {
+        var error = SqlFailure(number);
+        Check(!FtpConnectivity.IsRetryable(error) && EtlFailurePolicy.ShouldEmail(error), "Permanent SQL data failure would retry indefinitely or lack an email.");
+    }
+    Check(!EtlFailurePolicy.ShouldEmail(new IOException("Temporary transport")) && !EtlFailurePolicy.ShouldEmail(new RetryableEtlException("Retry later")), "Routine retry would email.");
+    Check(EtlFailurePolicy.ShouldEmail(new UnauthorizedAccessException("Access denied")), "Permission failure was hidden.");
+});
+Test("Mixed archive SQL truncation commits good CSV and routes failed CSV to Partial exception output", root =>
+{
+    var archive = Make(root, ".tgz", ("PSL.csv", "valid sales"), ("PPD.csv", "oversized payment"));
+    var backend = new FakeBackend { Fail = "PPD.csv", Failure = SqlFailure(2628) };
+    var result = new FtpConnectivity(log, backend).ProcessArchive(archive, "/Unprocessed/600005/input/mixed.tgz", "600005", _ => { });
+    Check(result.Result == EtlResult.Partial && backend.Committed == 1 && backend.RolledBack == 1 && backend.Status("/Unprocessed/600005/input/mixed.tgz") == "Partial", "Permanent PPD failure lost the successful CSV or left the archive in endless Retry.");
+    var failed = ArchiveFiles.Extract(result.Outputs.Single(o => o.Folder == "ExceptionFile").LocalPath, Path.Combine(root, "failed"));
+    Check(failed.Length == 1 && Path.GetFileName(failed[0]) == "PPD.csv", "Wrong CSVs were placed into the exception subset.");
+});
+Test("Transient SQL failure retains archive and recovers on the next attempt", root =>
+{
+    var archive = Make(root, ".zip", ("PSL.csv", "sales"));
+    var backend = new FakeBackend { Fail = "PSL.csv", Failure = SqlFailure(1205) }; var processor = new FtpConnectivity(log, backend);
+    Throws<System.Data.SqlClient.SqlException>(() => processor.ProcessArchive(archive, "/input/temporary.zip", "600005", _ => { }));
+    Check(backend.Status("/input/temporary.zip") == "Retry" && backend.Committed == 0, "Transient failure was terminal or committed incomplete CSV data.");
+    backend.Fail = null;
+    var retryDirectory = Path.Combine(root, "retry-after-timeout"); Directory.CreateDirectory(retryDirectory);
+    var retryArchive = Path.Combine(retryDirectory, Path.GetFileName(archive)); File.Copy(archive, retryArchive);
+    Check(processor.ProcessArchive(retryArchive, "/input/temporary.zip", "600005", _ => { }).Result == EtlResult.Processed && backend.Committed == 1, "Transient failure did not recover normally.");
+});
 Console.WriteLine($"{passed} regression scenarios passed. No SQL/SFTP connections or live writes were made.");
 
 sealed class FakeBackend : IEtlBackend
@@ -740,6 +785,7 @@ sealed class FakeBackend : IEtlBackend
     public bool FailCheckpoint { get; set; }
     public bool Configured { get; set; } = true;
     public string Fail { get; set; }
+    public Exception Failure { get; set; }
     public bool FailRegeneration { get; set; }
     public DateTime? Regeneration { get; private set; }
     public int RegenerationCalls { get; private set; }
@@ -774,7 +820,7 @@ sealed class FakeBackend : IEtlBackend
         Calls.Add(file);
         if (Transaction.Current == null) throw new Exception("CSV transaction missing.");
         Transaction.Current.EnlistVolatile(new TestWrite(() => Committed++, () => RolledBack++), EnlistmentOptions.None);
-        if (Path.GetFileName(file) == Fail) throw new InvalidDataException("Test data error.");
+        if (Path.GetFileName(file) == Fail) throw Failure ?? new InvalidDataException("Test data error.");
         if (ArchiveFiles.HasRegeneratedMarker(file)) File.WriteAllText(file, "marker removed by reader");
     }
     public void Regenerate(string site, DateTime timestamp)
@@ -814,6 +860,7 @@ sealed class FakeProvisioning : ILocalSftpUsers, ISiteSftpFolders, IProvisioning
 {
     public string Site { get; init; } = "123";
     public string Fail { get; set; }
+    public Exception Failure { get; set; }
     public bool FailCleanup { get; set; }
     public bool Deleted { get; private set; }
     public bool RolledBack { get; private set; }

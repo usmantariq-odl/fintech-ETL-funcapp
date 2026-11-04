@@ -144,7 +144,7 @@ public sealed class FtpConnectivity
     }
 
     private static bool IsRegeneratedCsv(string file) => ArchiveFiles.CsvOrder(file) is >= 5 and <= 9 && ArchiveFiles.HasRegeneratedMarker(file);
-    internal static bool IsRetryable(Exception ex) => ex is SqlException or RetryableEtlException or OperationCanceledException
+    internal static bool IsRetryable(Exception ex) => ex is SqlException sql ? FintechEtl.FunctionApp.EtlFailurePolicy.IsRetryableSql(sql) : ex is RetryableEtlException or OperationCanceledException
         || ex is IOException or System.Transactions.TransactionException;
 
     internal EtlOutcome ProcessMagLink(string local, string remote, string site)

@@ -40,15 +40,17 @@ internal static class LiveEmailOutboxCheck
                 first.Report("Partial", "007001", "first.tgz", "Synthetic check", "PSL.csv validation example");
                 // Proves delivery starts while invocation is still running, without Dispose or an interval tick.
                 await immediate.Task.WaitAsync(TimeSpan.FromSeconds(20));
-                first.Report("FileRetry", "007007", "second.zip", "Synthetic check", "PSL.csv retry example");
+                first.Report("FileProcessingFailure", "007007", "second.zip", "Synthetic check", "PSL.csv retry example");
             }
             if (sends != 2 || await Pending() != 0) throw new Exception("Errors were batched, throttled, or not individually acknowledged.");
             Task<string> FailSend(string[] r, string s, string t, string h, CancellationToken ct) => throw new InvalidOperationException("Simulated ACS outage");
             using (var failure = new EtlErrorEmails(NullLogger.Instance, "outbox-failure", FailSend, scope))
                 failure.Report("Partial", "007001", "retry.tgz", "Synthetic check", "PSL.csv example");
             if (await Pending() != 1) throw new Exception("ACS failure discarded its individual persisted event.");
+            await container.GetBlobClient(prefix + "legacy-retry.json").UploadAsync(BinaryData.FromObjectAsJson(
+                new EtlAlert("FileRetry", "007001", "old.tgz", "Retained", "Old retry notification", "old-run", DateTimeOffset.UtcNow)), overwrite: false);
             using (var recovery = new EtlErrorEmails(NullLogger.Instance, "outbox-recovery", FakeSend, scope)) { }
-            if (sends != 3 || await Pending() != 0) throw new Exception("Later run did not recover the pending event.");
+            if (sends != 3 || await Pending() != 0) throw new Exception("Later run did not recover the permanent event or sent a suppressed legacy retry.");
             Console.WriteLine("PASS live individual Blob outbox: immediate send before invocation end, separate messages, persistence, ACS failure retention and next-run recovery. Email sends simulated; no SQL/SFTP data accessed.");
         }
         finally
