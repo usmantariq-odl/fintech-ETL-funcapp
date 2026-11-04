@@ -9,8 +9,8 @@ internal sealed record SqlWriteOptions(int BatchSize, int CommandTimeoutSeconds,
 {
     public static SqlWriteOptions Load() => new(
         Read("EtlSqlBatchSize", 1000, 1, 5000),
-        Read("EtlSqlCommandTimeoutSeconds", 120, 1, 300),
-        Read("EtlCsvTransactionTimeoutSeconds", 600, 30, 600));
+        Read("EtlSqlCommandTimeoutSeconds", 300, 1, 300),
+        Read("EtlCsvTransactionTimeoutSeconds", 1200, 30, 1200));
 
     private static int Read(string name, int fallback, int min, int max)
     {

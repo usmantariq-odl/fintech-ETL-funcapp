@@ -17,7 +17,7 @@ internal static class SqlBatchChecks
             for (int i = 0; i < rows; i++) t.Rows.Add(site, i.ToString(), i == 0 ? DBNull.Value : "007001");
             return t;
         }
-        var options = new SqlWriteOptions(1000, 120, 600);
+        var options = new SqlWriteOptions(1000, 300, 1200);
         Test("batch boundaries preserve order, identity, values and progress", () =>
         {
             using var source = Data(2501); var sizes = new List<int>(); var progress = new List<int>(); int expected = 0;
@@ -75,7 +75,7 @@ internal static class SqlBatchChecks
         Test("command preserves stored procedure, type, ID and bounded timeout", () =>
         {
             using var t=Data(1);using var con=new SqlConnection();using var cmd=SqlTransactionBatches.CreateCommand(con,t,4553444,options);
-            Check(cmd.CommandTimeout==120 && cmd.CommandType==CommandType.StoredProcedure && cmd.CommandText=="dbo.InsertintoFintechTransactions","Wrong command/timeout.");
+            Check(cmd.CommandTimeout==300 && cmd.CommandType==CommandType.StoredProcedure && cmd.CommandText=="dbo.InsertintoFintechTransactions","Wrong command/timeout.");
             Check(cmd.Parameters["@TransactionsTable"].TypeName=="dbo.TransactionsTableType" && (int)cmd.Parameters["@ProcessedFileID"].Value==4553444,"Wrong type or parent ID.");
         });
         Test("aborted transaction prevents later batches", () =>
@@ -96,7 +96,13 @@ internal static class SqlBatchChecks
             {
                 foreach(var n in names)Environment.SetEnvironmentVariable(n,null);
                 Check(SqlWriteOptions.Load()==options,"Incorrect defaults.");
-                foreach(var (name,value) in new[]{(names[0],"0"),(names[0],"5001"),(names[1],"0"),(names[2],"601")})
+                using(var scope=EtlTransaction.Begin())
+                {
+                    Check(TransactionManager.MaximumTimeout>=TimeSpan.FromMinutes(20),"Runtime ceiling clamps the CSV budget.");
+                    Check(Transaction.Current.TransactionInformation.Status==TransactionStatus.Active,"New twenty-minute scope is not active.");
+                    scope.Complete();
+                }
+                foreach(var (name,value) in new[]{(names[0],"0"),(names[0],"5001"),(names[1],"0"),(names[1],"301"),(names[2],"1201")})
                 {
                     Environment.SetEnvironmentVariable(name,value);bool rejected=false;
                     try { SqlWriteOptions.Load(); }catch(InvalidOperationException){rejected=true;}

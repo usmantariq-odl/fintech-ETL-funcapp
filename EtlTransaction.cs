@@ -5,13 +5,19 @@ namespace CSVReader;
 
 internal static class EtlTransaction
 {
+    private static readonly object TimeoutLock = new();
     // Sequential connections with the same connection string reuse the enlisted SQL session.
     // Keep one CSV's writes and its completion checkpoint in the same transaction.
     public static TransactionScope Begin()
     {
         var timeout = TimeSpan.FromSeconds(SqlWriteOptions.Load().CsvTransactionTimeoutSeconds);
-        if (timeout > TransactionManager.MaximumTimeout)
-            throw new InvalidOperationException("EtlCsvTransactionTimeoutSeconds exceeds this host's transaction maximum.");
+        lock (TimeoutLock)
+        {
+            // Raise the process ceiling before creating the scope, so the runtime
+            // does not silently clamp the requested CSV budget to ten minutes.
+            if (timeout > TransactionManager.MaximumTimeout)
+                TransactionManager.MaximumTimeout = timeout;
+        }
         return new(TransactionScopeOption.Required,
             new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted, Timeout = timeout },
             TransactionScopeAsyncFlowOption.Enabled);

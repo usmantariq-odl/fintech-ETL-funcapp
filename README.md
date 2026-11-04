@@ -210,10 +210,10 @@ Optional Azure environment settings (defaults work without adding them):
 | Setting | Default | Allowed range |
 |---|---|---|
 | `EtlSqlBatchSize` | `1000` | 1–5000 rows per transaction insert call |
-| `EtlSqlCommandTimeoutSeconds` | `120` | 1–300 seconds per transaction insert call |
-| `EtlCsvTransactionTimeoutSeconds` | `600` | 30–600 seconds for the whole CSV transaction |
+| `EtlSqlCommandTimeoutSeconds` | `300` | 1–300 seconds per transaction insert call |
+| `EtlCsvTransactionTimeoutSeconds` | `1200` | 30–1200 seconds for the whole CSV transaction |
 
-The CSV timeout must fit the host's System.Transactions maximum; an unsupported value fails explicitly instead of being silently shortened. The default replaces the earlier three-minute CSV limit. A saturated database can still time out; these settings do not provide unlimited retries or additional SQL capacity. No database schema/stored-procedure changes are needed. Deploy this main-branch build to apply the change; existing retry inputs are picked up automatically.
+The worker raises the process System.Transactions ceiling before creating a CSV scope, so the twenty-minute default is not silently shortened to the runtime's ten-minute ceiling. Updates apply to new scopes, not transactions already running. A saturated database can still time out; these settings do not provide unlimited retries or additional SQL capacity. No database schema/stored-procedure changes are needed. Deploy this main-branch build to apply the change; existing retry inputs are picked up automatically. Explicit Azure environment values override defaults: use `EtlSqlCommandTimeoutSeconds=300` and `EtlCsvTransactionTimeoutSeconds=1200` if those settings already exist. Deploy after the current invocation completes to avoid interrupting its transaction.
 
 An opt-in `--large-csv-sql-check --fixture <archive.zip>` mode in the regression test project checks the actual PSL fixture and the configured database's transaction procedure conversion body against session-local temporary tables. It verifies later-batch SQL failure rollback, successful row counts/volumes/site/archive references and the atomic checkpoint. It does not write application tables, alter persistent schema, publish archives or send email. Its heap-table timing is diagnostic and does not predict production indexed-table throughput.
 
