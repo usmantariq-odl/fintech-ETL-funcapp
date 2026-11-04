@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.SqlClient;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 using System.Data;
 using System.Text;
@@ -226,6 +226,33 @@ VALUES");
             Console.WriteLine(ex.Message);
             throw;
         }
+    }
+
+    private const string PreservedConfigurationPredicate = @"
+        EXISTS (SELECT 1 FROM Assets a WHERE a.Site_Id_FK = @siteId)
+        AND EXISTS (SELECT 1 FROM Omni_Fintech_TankMapping t WHERE t.Omni_SiteID = @siteId)
+        AND EXISTS (SELECT 1 FROM Omni_Fintech_PumpMapping p WHERE p.Omni_SiteID = @siteId)";
+
+    public virtual async Task<bool> HasPreservedSiteConfiguration(int customerId, int siteId)
+    {
+        var result = await ExecuteReaderAsync(@"SELECT 1 FROM FintechMappedCustomers
+            WHERE CustomerId = @customerId AND SiteId = @siteId AND " + PreservedConfigurationPredicate,
+            row => row.GetInt32(0), new SqlParameter("@customerId", customerId), new SqlParameter("@siteId", siteId));
+        return result.Count > 0;
+    }
+
+    public virtual async Task<bool> RestorePreservedSiteActivation(int customerId, int siteId)
+    {
+        if (configurationTransaction is not null)
+            throw new InvalidOperationException("Restore activation only after the failed replacement transaction has rolled back.");
+        await using var connection = new SqlConnection(_settings.Value.AzureSql);
+        await connection.OpenAsync();
+        // Update only an existing activation row with preserved assets and mappings. Never create a new activation/pointer.
+        await using var command = new SqlCommand(@"UPDATE FintechMappedCustomers SET IsActive = 1
+            WHERE CustomerId = @customerId AND SiteId = @siteId AND " + PreservedConfigurationPredicate, connection);
+        command.Parameters.Add("@customerId", SqlDbType.Int).Value = customerId;
+        command.Parameters.Add("@siteId", SqlDbType.Int).Value = siteId;
+        return await command.ExecuteNonQueryAsync() > 0;
     }
 
     public virtual async Task<bool> MarkSiteActivated(int customerId, int siteId)

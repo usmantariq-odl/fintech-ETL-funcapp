@@ -8,7 +8,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="tests/**/*.cs;artifacts/**/*.cs" />
     <None Update="*-email-app-settings.local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <None Update="host.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="local.settings*.json;azure-app-settings*.json;appsettings*.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />

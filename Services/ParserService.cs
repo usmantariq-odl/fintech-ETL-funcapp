@@ -31,6 +31,25 @@ internal class ParserService
         }
         List<SiteMetaDataResponse> siteMetaData = new();
         SiteMetaDataResponse? siteObj = null;
+        bool restorePreservedActivation = false;
+        async Task<string> RestoreOnError()
+        {
+            if (!restorePreservedActivation || siteObj is null) return "No preserved reconfiguration was eligible for activation restoration.";
+            try
+            {
+                if (!await _sqlService.RestorePreservedSiteActivation(siteObj.FintechCustomerId ?? 0, siteObj.FintechSiteId ?? 0))
+                    throw new InvalidOperationException("Preserved activation row or configuration is no longer available.");
+                siteObj.IsActive = true;
+                return "Preserved site configuration reactivated: IsActive=1. Reconfiguration remains Error.";
+            }
+            catch (Exception error)
+            {
+                var detail = "ACTIVATION RESTORATION FAILED; operator intervention required. " + error;
+                siteObj.Exception += "\n" + detail;
+                Console.Error.WriteLine(FintechAutoSiteConfiguration.FunctionApp.AutoSiteErrorEmails.Redact(detail));
+                return detail;
+            }
+        }
         try
         {
             List<int> processedList;
@@ -79,6 +98,7 @@ internal class ParserService
                         FC_SiteId = 0;
                         activeFile = _files.DescribeSource(filePath);
                         activeSite = null;
+                        restorePreservedActivation = false;
                         try
                         {
                             if (string.IsNullOrWhiteSpace(filePath))
@@ -139,6 +159,10 @@ internal class ParserService
                             Console.WriteLine($"_data: configuration_allowed = {siteObj.IsConfigurationAllowed} | activation_allowed = {siteObj.IsActivationAllowed}");
                             if (siteObj.IsConfigurationAllowed != true) continue;
 
+                            // The portal may already have set IsActive=0. Remember whether a complete old
+                            // configuration exists before parsing or replacing anything for this approval.
+                            restorePreservedActivation = approvedReconfiguration && await _sqlService.HasPreservedSiteConfiguration(
+                                siteObj.FintechCustomerId ?? 0, siteObj.FintechSiteId ?? 0);
                             Console.WriteLine($"STEP 1: Reading");
                             var document = HelperService.ReadFile(filePath);
 
@@ -184,8 +208,9 @@ internal class ParserService
                                     {
                                         siteObj.Status = "Error";
                                         siteObj.Exception = $"Error processing file: {filePath}";
-                                        _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, $"Error processing file: {filePath}");
-                                        Error("ConfigurationFailed", activeSite, activeFile, "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/", "Configuration replacement reported failure. Inspect transaction and mapping diagnostics before retry.");
+                                        var activationResult = await RestoreOnError();
+                                        _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, $"Error processing file: {filePath}\n{activationResult}");
+                                        Error("ConfigurationFailed", activeSite, activeFile, "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/", "Configuration replacement reported failure. " + activationResult);
                                     }
                                 }
                                 else
@@ -204,16 +229,17 @@ internal class ParserService
                                 siteObj.Status = "Error";
                                 siteObj.Exception = ex.Message;
                                 // Validation never mutates SQL; failed replacement rolls back.
-                                // Keep the current activation and working configuration intact.
+                                // Restore preserved activation below after validation failure or transaction rollback.
 
                             }
+                            var activationResult = await RestoreOnError();
                             try { _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, ex); }
                             catch (Exception storageError)
                             {
                                 throw new ConfigurationStorageException("Configuration failed and exception-file publication also failed. Verify actual file location and committed configuration.", new AggregateException(ex, storageError));
                             }
                             Error("ConfigurationRejectedOrFailed", activeSite, activeFile,
-                                "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/; validation runs before replacement, and failed replacements use transaction rollback. Verify actual activation state.", ex.ToString());
+                                "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/; " + activationResult, ex + "\n\n" + activationResult);
                         }
                     }
                 }

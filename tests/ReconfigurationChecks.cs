@@ -157,6 +157,38 @@ internal static class ReconfigurationChecks
             await Process(sql, remote, (category, site, file, disposition, detail) => details.Add(detail));
             Check(details.Count == 1 && details[0].Contains("rolled back") && sql.RolledBack && sql.Active, "Rollback error email is missing or working activation changed.");
         });
+        foreach (var failure in new[] { "validation", "replacement", "activation" })
+        {
+            await Test($"Portal-deactivated existing site reactivates preserved configuration after {failure} error", async () =>
+            {
+                var remote = new FakeRemote(); var name = "CON-60000520261030120000.csv";
+                remote.Put("/ConfigurationUpdate/600005/" + name, failure == "validation" ? "<ROOT><bad>" : Request().document.ToString());
+                var sql = new FakeConfigurationSql { Active = false, FailAt = failure == "replacement" ? "pumpMapping" : failure == "activation" ? "activation" : "" };
+                sql.Site.IsActive = false;
+                var notifications = new List<string>();
+                await Process(sql, remote, (_, _, _, _, detail) => notifications.Add(detail));
+                Check(sql.Active && sql.Site.IsActive == true && sql.Site.Status == "Error" && sql.Restores == 1
+                    && sql.Assets.Single().AssetName == "working asset" && remote.Exists("/Exception/600005/" + name), "Failed reconfiguration did not restore the preserved site's activation or archive its CON.");
+                Check(notifications.Count == 1 && notifications[0].Contains("IsActive=1"), "Error email omitted restored activation outcome.");
+            });
+        }
+        await Test("Rejected first configuration never activates a site with no preserved mappings", async () =>
+        {
+            var remote = new FakeRemote(); remote.Put("/Unprocessed/CON-60000520261030120000.csv", "<ROOT><bad>");
+            var sql = new FakeConfigurationSql { Active = false, TankMapping = "", PumpMapping = "" };
+            sql.Site.IsActive = false; sql.Assets.Clear();
+            await Process(sql, remote);
+            Check(!sql.Active && sql.Site.IsActive == false && sql.Restores == 0 && sql.Site.Status == "Error", "Invalid new site was activated.");
+        });
+        await Test("Failed activation restoration still routes exception and reports failure accurately", async () =>
+        {
+            var remote = new FakeRemote(); remote.Put("/Unprocessed/CON-60000520261030120000.csv", "<ROOT><bad>");
+            var sql = new FakeConfigurationSql { Active = false, FailAt = "restore" }; sql.Site.IsActive = false;
+            var notifications = new List<string>();
+            await Process(sql, remote, (_, _, _, _, detail) => notifications.Add(detail));
+            Check(!sql.Active && remote.Exists("/Exception/600005/CON-60000520261030120000.csv")
+                && notifications.Single().Contains("ACTIVATION RESTORATION FAILED"), "Failed restore was hidden or exception publication skipped.");
+        });
         Console.WriteLine($"{count} reconfiguration regression scenarios passed.");
     }
 
@@ -193,7 +225,7 @@ internal sealed class FakeConfigurationSql() : SQLService(Options.Create(new App
     public List<AssetResponse> Assets = [new() { AssetId = 100, AssetName = "working asset", AssetType = "24" }];
     public string TankMapping = "working tanks", PumpMapping = "working pumps", FailAt = "";
     public bool Active = true, Committed, RolledBack;
-    public int Transactions, Clears, Activations;
+    public int Transactions, Clears, Activations, Restores;
     public override async Task ExecuteConfigurationTransactionAsync(int siteId, Func<Task> replace)
     {
         Transactions++; var assets = Assets.ToList(); var tank = TankMapping; var pump = PumpMapping; bool active = Active;
@@ -212,6 +244,13 @@ internal sealed class FakeConfigurationSql() : SQLService(Options.Create(new App
     public override Task<List<AssetResponse>> GetAssetsBySiteId(int siteId) => Task.FromResult(FailAt == "readAssets" ? new List<AssetResponse>() : Assets);
     public override Task<bool> SaveTankMapping(List<CreateTankMappingRequest> mappings, int siteId) { TankMapping = "new tanks"; return Task.FromResult(FailAt != "tankMapping"); }
     public override Task<bool> SavePumpMapping(List<CreatePumpMappingRequest> mappings, int siteId) { PumpMapping = "new pumps"; return Task.FromResult(FailAt != "pumpMapping"); }
+    public override Task<bool> HasPreservedSiteConfiguration(int customerId, int siteId) => Task.FromResult(Assets.Count > 0 && TankMapping.Length > 0 && PumpMapping.Length > 0);
+    public override Task<bool> RestorePreservedSiteActivation(int customerId, int siteId)
+    {
+        Restores++;
+        if (FailAt == "restore") throw new InvalidOperationException("Simulated activation restore failure.");
+        Active = true; return Task.FromResult(true);
+    }
     public override Task<bool> MarkSiteActivated(int customerId, int siteId) { Active = true; Activations++; return Task.FromResult(FailAt != "activation"); }
     public override Task<List<SiteAndProductResponse>> GetOmniSiteIdAndProducts(int fcSiteId) => Task.FromResult(Products);
     public override Task<List<SiteMetaDataResponse>> GetSitesMetaData() => Task.FromResult(new List<SiteMetaDataResponse> { Site });
