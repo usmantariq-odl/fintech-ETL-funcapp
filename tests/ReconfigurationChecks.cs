@@ -122,7 +122,7 @@ internal static class ReconfigurationChecks
             var events = new List<(string Category, string? Site, string? File, string Detail)>(); int legacy = 0;
             await Process(new FakeConfigurationSql(), remote,
                 (category, site, file, disposition, detail) => events.Add((category, site, file, detail)), (_, _, _) => legacy++);
-            Check(events.Count == 1 && events[0].Category == "ConfigurationRejectedOrFailed" && events[0].File == source && events[0].Site == "600005" && events[0].Detail.Contains("Exception"), "Error lacks original CON path or actual exception, or was duplicated.");
+            Check(events.Count == 1 && events[0].Category == "Reconfiguration Failed" && events[0].File == source && events[0].Site == "600005" && events[0].Detail.Contains("Exception"), "Error lacks original CON path or actual exception, or was duplicated.");
             Check(legacy == 0 && remote.Exists("/Exception/600005/CON-60000520261030120000.csv"), "Legacy error email was duplicated or exception routing failed.");
         });
         await Test("Invalid CON filename triggers a structured exception-route alert", async () =>
@@ -169,7 +169,10 @@ internal static class ReconfigurationChecks
                 await Process(sql, remote, (_, _, _, _, detail) => notifications.Add(detail));
                 Check(sql.Active && sql.Site.IsActive == true && sql.Site.Status == "Error" && sql.Restores == 1
                     && sql.Assets.Single().AssetName == "working asset" && remote.Exists("/Exception/600005/" + name), "Failed reconfiguration did not restore the preserved site's activation or archive its CON.");
-                Check(notifications.Count == 1 && notifications[0].Contains("IsActive=1"), "Error email omitted restored activation outcome.");
+                Check(notifications.Count == 1 && notifications[0].Contains("IsActive=1") && notifications[0].Contains("Reconfiguration Failed")
+                    && sql.Site.Exception!.StartsWith("Reconfiguration Failed:")
+                    && remote.Read("/Exception/600005/" + Path.ChangeExtension(name, ".txt")).Contains("Reconfiguration Failed"),
+                    "Reconfiguration email, saved error or sidecar omitted context/restored activation.");
             });
         }
         await Test("Rejected first configuration never activates a site with no preserved mappings", async () =>

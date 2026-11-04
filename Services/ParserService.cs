@@ -32,6 +32,8 @@ internal class ParserService
         List<SiteMetaDataResponse> siteMetaData = new();
         SiteMetaDataResponse? siteObj = null;
         bool restorePreservedActivation = false;
+        bool reconfigurationAttempt = false;
+        string FailureLabel() => reconfigurationAttempt ? "Reconfiguration Failed" : "Configuration Failed";
         async Task<string> RestoreOnError()
         {
             if (!restorePreservedActivation || siteObj is null) return "No preserved reconfiguration was eligible for activation restoration.";
@@ -45,7 +47,6 @@ internal class ParserService
             catch (Exception error)
             {
                 var detail = "ACTIVATION RESTORATION FAILED; operator intervention required. " + error;
-                siteObj.Exception += "\n" + detail;
                 Console.Error.WriteLine(FintechAutoSiteConfiguration.FunctionApp.AutoSiteErrorEmails.Redact(detail));
                 return detail;
             }
@@ -99,6 +100,7 @@ internal class ParserService
                         activeFile = _files.DescribeSource(filePath);
                         activeSite = null;
                         restorePreservedActivation = false;
+                        reconfigurationAttempt = false;
                         try
                         {
                             if (string.IsNullOrWhiteSpace(filePath))
@@ -161,8 +163,11 @@ internal class ParserService
 
                             // The portal may already have set IsActive=0. Remember whether a complete old
                             // configuration exists before parsing or replacing anything for this approval.
+                            reconfigurationAttempt = approvedReconfiguration && (siteObj.IsActive == true ||
+                                activeFile?.Replace('\\', '/').StartsWith(_settings.Value.ConfigurationUpdateFolder.TrimEnd('/') + "/", StringComparison.Ordinal) == true);
                             restorePreservedActivation = approvedReconfiguration && await _sqlService.HasPreservedSiteConfiguration(
                                 siteObj.FintechCustomerId ?? 0, siteObj.FintechSiteId ?? 0);
+                            reconfigurationAttempt |= restorePreservedActivation;
                             Console.WriteLine($"STEP 1: Reading");
                             var document = HelperService.ReadFile(filePath);
 
@@ -207,10 +212,11 @@ internal class ParserService
                                     else
                                     {
                                         siteObj.Status = "Error";
-                                        siteObj.Exception = $"Error processing file: {filePath}";
+                                        siteObj.Exception = $"{FailureLabel()}: error processing file: {filePath}";
                                         var activationResult = await RestoreOnError();
-                                        _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, $"Error processing file: {filePath}\n{activationResult}");
-                                        Error("ConfigurationFailed", activeSite, activeFile, "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/", "Configuration replacement reported failure. " + activationResult);
+                                        siteObj.Exception += "\n" + activationResult;
+                                        _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, $"{FailureLabel()}: error processing file: {filePath}\n{activationResult}");
+                                        Error(FailureLabel(), activeSite, activeFile, "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/", FailureLabel() + ". Configuration replacement reported failure. " + activationResult);
                                     }
                                 }
                                 else
@@ -227,19 +233,21 @@ internal class ParserService
                             if (siteObj is not null)
                             {
                                 siteObj.Status = "Error";
-                                siteObj.Exception = ex.Message;
+                                siteObj.Exception = FailureLabel() + ": " + ex.Message;
                                 // Validation never mutates SQL; failed replacement rolls back.
                                 // Restore preserved activation below after validation failure or transaction rollback.
 
                             }
                             var activationResult = await RestoreOnError();
-                            try { _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, ex); }
+                            if (siteObj is not null) siteObj.Exception += "\n" + activationResult;
+                            var reportedError = new InvalidOperationException(FailureLabel() + ": " + ex.Message + "\n" + activationResult, ex);
+                            try { _fileHelper.MoveFileToException(filePath, FC_SiteId.ToString(), _settings, reportedError); }
                             catch (Exception storageError)
                             {
                                 throw new ConfigurationStorageException("Configuration failed and exception-file publication also failed. Verify actual file location and committed configuration.", new AggregateException(ex, storageError));
                             }
-                            Error("ConfigurationRejectedOrFailed", activeSite, activeFile,
-                                "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/; " + activationResult, ex + "\n\n" + activationResult);
+                            Error(reconfigurationAttempt ? "Reconfiguration Failed" : "ConfigurationRejectedOrFailed", activeSite, activeFile,
+                                "Moved to " + _settings.Value.ExceptionFolder + "/" + FC_SiteId + "/; " + activationResult, reportedError.ToString());
                         }
                     }
                 }
