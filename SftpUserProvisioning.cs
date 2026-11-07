@@ -119,8 +119,8 @@ internal sealed class SftpUserProvisioner(ILocalSftpUsers users, Func<ISiteSftpF
             {
                 try
                 {
-                    // Revoke authentication before removing folders, keeping the UID resolvable until
-                    // its directories are gone. Remove only empty directories created by this request.
+                    // Revoke authentication before restoring adopted ACLs/removing new empty folders,
+                    // keeping the UID resolvable until rollback finishes. Never remove existing data.
                     using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
                     try { await users.Disable(request.SftpUsername, cleanup.Token); }
                     catch

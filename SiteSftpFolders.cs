@@ -11,7 +11,7 @@ internal sealed class SiteSftpFolders : ISiteSftpFolders
     private readonly EtlSettings settings;
     private readonly string account;
     private readonly SftpClient admin;
-    private readonly List<string> created = [];
+    private readonly SiteFolderAdoption adoption;
     private readonly List<(string Path, int Owner, int Group, bool GroupAccess, bool IsDirectory)> siblings = [];
     private (int Owner, int Group, bool GroupAccess) conRoot;
 
@@ -20,6 +20,7 @@ internal sealed class SiteSftpFolders : ISiteSftpFolders
         this.settings = settings;
         this.account = account;
         admin = Connect(settings.Username, settings.Password);
+        adoption = new SiteFolderAdoption(new SftpFolderStore(admin));
     }
 
     private SftpClient Connect(string username, string password) => OpenClient(settings, username, password);
@@ -45,15 +46,14 @@ internal sealed class SiteSftpFolders : ISiteSftpFolders
     {
         if (admin.WorkingDirectory.TrimEnd('/') != "")
             throw new ProvisioningException(503, "ProvisioningNotConfigured", "The sftpadmin home directory must be the sftp-data container root.");
-        if (admin.Exists(SftpLayout.SiteRoot(site)))
-            throw new ProvisioningException(409, "SiteAlreadyExists", "The site folder already exists. Its files and ownership were not changed.");
+        adoption.Inspect(SftpLayout.SiteRoot(site));
         // Fail closed if another branch is publicly accessible. The common ancestors require
         // execute permission, so every sibling branch must protect its own contents.
         foreach (var entry in admin.ListDirectory("/").Where(f => f.Name is not "." and not ".." && f.Name != "Unprocessed"))
             CheckPrivateBranch(entry.FullName, entry.Attributes);
         if (admin.Exists(SftpLayout.UnprocessedRoot))
         {
-            foreach (var entry in admin.ListDirectory(SftpLayout.UnprocessedRoot).Where(f => f.Name is not "." and not ".."))
+            foreach (var entry in admin.ListDirectory(SftpLayout.UnprocessedRoot).Where(f => f.Name is not "." and not ".." && f.Name != site))
                 CheckPrivateBranch(entry.FullName, entry.Attributes);
         }
         using var conAdmin = Connect(account + ".con-files.sftpadmin", settings.Password);
@@ -86,24 +86,7 @@ internal sealed class SiteSftpFolders : ISiteSftpFolders
         SetTraversalOnly("/");
         if (!admin.Exists(SftpLayout.UnprocessedRoot)) admin.CreateDirectory(SftpLayout.UnprocessedRoot);
         SetTraversalOnly(SftpLayout.UnprocessedRoot);
-        foreach (var path in new[] { SftpLayout.SiteRoot(site), SftpLayout.Input(site), SftpLayout.Output(site) })
-        {
-            if (admin.Exists(path)) throw new ProvisioningException(409, "SiteAlreadyExists", "A site folder appeared during provisioning. No existing folder was reassigned.");
-            admin.CreateDirectory(path);
-            created.Add(path);
-            var attributes = admin.GetAttributes(path);
-            attributes.UserId = ownerId;
-            attributes.GroupId = ownerId;
-            attributes.OwnerCanRead = attributes.OwnerCanWrite = attributes.OwnerCanExecute = true;
-            attributes.GroupCanRead = attributes.GroupCanWrite = attributes.GroupCanExecute = false;
-            attributes.OthersCanRead = attributes.OthersCanWrite = attributes.OthersCanExecute = false;
-            admin.SetAttributes(path, attributes);
-            var actual = admin.GetAttributes(path);
-            if (actual.UserId != ownerId || actual.GroupId != ownerId || !actual.OwnerCanRead || !actual.OwnerCanWrite || !actual.OwnerCanExecute
-                || actual.GroupCanRead || actual.GroupCanWrite || actual.GroupCanExecute
-                || actual.OthersCanRead || actual.OthersCanWrite || actual.OthersCanExecute)
-                throw new ProvisioningException(502, "AclVerificationFailed", "The site directory ownership or permissions could not be verified.");
-        }
+        adoption.Apply(SftpLayout.SiteRoot(site), ownerId);
     }
 
     private void SetTraversalOnly(string path)
@@ -170,13 +153,44 @@ internal sealed class SiteSftpFolders : ISiteSftpFolders
 
     public void Rollback()
     {
-        foreach (var path in created.AsEnumerable().Reverse())
-        {
-            if (!admin.IsConnected) admin.Connect();
-            if (admin.Exists(path)) admin.DeleteDirectory(path); // Fails safely if nonempty.
-        }
+        if (!admin.IsConnected) admin.Connect();
+        adoption.Rollback();
     }
 
     public void Dispose() => admin.Dispose();
+
+    private sealed class SftpFolderStore(SftpClient client) : ISiteFolderStore
+    {
+        public bool Exists(string path) => client.Exists(path);
+        public SiteFolderEntry Read(string path) => Entry(path, client.GetAttributes(path));
+        public IEnumerable<SiteFolderEntry> List(string path) => client.ListDirectory(path)
+            .Where(f => f.Name is not "." and not "..")
+            .Select(f => Entry(f.FullName, f.Attributes)).ToArray();
+        public void CreateDirectory(string path) => client.CreateDirectory(path);
+        public void DeleteDirectory(string path) => client.DeleteDirectory(path);
+        public void SetAccess(string path, int owner, int group, int mode)
+        {
+            // Fetch fresh attributes so file sizes/timestamps are never restored from a stale snapshot.
+            var attributes = client.GetAttributes(path);
+            if (attributes.IsSymbolicLink) throw new IOException("A symbolic link appeared during provisioning.");
+            attributes.UserId = owner;
+            attributes.GroupId = group;
+            attributes.OwnerCanRead = (mode & 256) != 0;
+            attributes.OwnerCanWrite = (mode & 128) != 0;
+            attributes.OwnerCanExecute = (mode & 64) != 0;
+            attributes.GroupCanRead = (mode & 32) != 0;
+            attributes.GroupCanWrite = (mode & 16) != 0;
+            attributes.GroupCanExecute = (mode & 8) != 0;
+            attributes.OthersCanRead = (mode & 4) != 0;
+            attributes.OthersCanWrite = (mode & 2) != 0;
+            attributes.OthersCanExecute = (mode & 1) != 0;
+            client.SetAttributes(path, attributes);
+        }
+        private static SiteFolderEntry Entry(string path, SftpFileAttributes a) => new(path,
+            a.IsDirectory, a.IsRegularFile, a.IsSymbolicLink, a.UserId, a.GroupId,
+            (a.OwnerCanRead ? 256 : 0) | (a.OwnerCanWrite ? 128 : 0) | (a.OwnerCanExecute ? 64 : 0)
+            | (a.GroupCanRead ? 32 : 0) | (a.GroupCanWrite ? 16 : 0) | (a.GroupCanExecute ? 8 : 0)
+            | (a.OthersCanRead ? 4 : 0) | (a.OthersCanWrite ? 2 : 0) | (a.OthersCanExecute ? 1 : 0));
+    }
 
 }
