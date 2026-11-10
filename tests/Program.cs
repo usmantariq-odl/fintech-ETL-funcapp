@@ -693,6 +693,29 @@ Test("Individual email keeps one event, site and file diagnostics after persiste
         Check(message.Total == 1 && message.Samples.Count == 1 && rendered.Subject.Contains("007001") && rendered.Text.Contains("file" + i), "Individual event was merged or lost.");
     }
 });
+Test("Alert environment labels replace the resource name in subject and both bodies", _ =>
+{
+    var previous = Environment.GetEnvironmentVariable("EtlEnvironment");
+    try
+    {
+        foreach (var (environment, label) in new[] { ("Production", "PROD"), ("Staging", "STAG"), (" production ", "PROD"), ("stag", "STAG") })
+        {
+            Environment.SetEnvironmentVariable("EtlEnvironment", environment);
+            var digest = new AlertDigest();
+            digest.Add(new("FileProcessingFailure", "007214", "archive.zip", "ExceptionFile", "Example failure", "run", DateTimeOffset.UtcNow));
+            foreach (var test in new[] { true, false })
+            {
+                var body = EtlErrorEmails.Render(digest, "func-fintech-ETL-stag", test);
+                Check(body.Subject.Contains("Fintech ETL " + label) && body.Text.Contains("Application: Fintech ETL " + label)
+                    && body.Html.Contains("Fintech ETL " + label), "An email field retained the wrong environment.");
+                Check(!body.Subject.Contains("func-fintech-ETL-stag") && !body.Html.Contains("func-fintech-ETL-stag"), "Resource name overrides the configured environment.");
+            }
+        }
+        Check(EtlErrorEmails.AlertApplicationName("original-app", null) == "original-app"
+            && EtlErrorEmails.AlertApplicationName("original-app", "unknown") == "original-app", "Unconfigured installations lost their existing label.");
+    }
+    finally { Environment.SetEnvironmentVariable("EtlEnvironment", previous); }
+});
 Test("Error email redacts credentials and encodes untrusted diagnostics", root =>
 {
     var old = Environment.GetEnvironmentVariable("TestConnectionString");

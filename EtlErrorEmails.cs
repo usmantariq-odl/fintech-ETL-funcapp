@@ -223,6 +223,8 @@ internal sealed class EtlErrorEmails : IDisposable
 
     internal static (string Subject, string Text, string Html) Render(AlertDigest digest, string app, bool test)
     {
+        // Presentation only: the real app/slot identity still scopes the durable outbox.
+        app = AlertApplicationName(app, Environment.GetEnvironmentVariable("EtlEnvironment"));
         var title = test ? "TEST — Fintech ETL error notification" : "Fintech ETL — processing errors require review";
         var text = new StringBuilder().AppendLine(title).AppendLine($"Application: {app}")
             .AppendLine($"Generated (UTC): {DateTimeOffset.UtcNow:O}")
@@ -244,6 +246,13 @@ internal sealed class EtlErrorEmails : IDisposable
         var subject = test ? $"[TEST] {app} — ETL error notification" : $"[ETL ALERT] {app} — {firstEvent?.Category} — site {firstEvent?.Site ?? "N/A"}";
         return (subject, plain, RenderHtml(digest, app, test));
     }
+
+    internal static string AlertApplicationName(string app, string environment) => environment?.Trim().ToUpperInvariant() switch
+    {
+        "PRODUCTION" or "PROD" => "Fintech ETL PROD",
+        "STAGING" or "STAG" => "Fintech ETL STAG",
+        _ => app // Preserve existing labeling on installations without the new setting.
+    };
 
     private static string RenderHtml(AlertDigest digest, string app, bool test)
     {
