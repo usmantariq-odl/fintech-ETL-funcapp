@@ -58,15 +58,16 @@ WHERE r.EntityType='TXN' AND r.SiteID IN(1191,1192)
                         if(Math.Abs(Convert.ToDouble(row["Volume"])-(double)saleReading.Volume.Value)>1e-8||
                            Math.Abs(Convert.ToDouble(row["Money"])-(double)saleReading.Amount.Value)>1e-8||
                            Math.Abs(Convert.ToDouble(row["PPU"])-(double)saleReading.Price.Value)>1e-8||
+                           row.IsNull("Final_Volume")||Math.Abs(Convert.ToDouble(row["Final_Volume"])-(double)saleReading.Totalizer.Value)>1e-8||
                            Convert.ToInt32(row["Sale_ID"])!=int.Parse(saleReading.RecordId)||
                            (string)row["AlsonPumpCode"]!=saleReading.Dispenser||
                            Convert.ToInt32(row["Pump_ID"])!=Convert.ToInt32(row["FC_PumpID"])||
                            Convert.ToInt32(row["Hose_ID"])!=saleReading.Nozzle||
                            (DateTime)row["FC_EndDateTime"]!=saleReading.At)
                             throw new Exception("Sale differs from original frame/mapping.");
-                        int grade=saleReading.Product switch{"R"=>1,"D"=>2,"H"=>3,_=>throw new Exception("Unknown product")};
+                        int grade=saleReading.Product switch{"R"=>2,"D"=>3,"H"=>1,_=>throw new Exception("Unknown product")};
                         if(Convert.ToInt32(row["Grade_ID"])!=grade)throw new Exception("Wrong product grade.");
-                        foreach(var name in new[]{"Start_Date","Start_Time","FC_StartDateTime","Final_Volume","Initial_Volume","Payment_Type","Sale_Type","Sale_Auth","Authorizer","Preset_Amount","Level","UnitPrice","IsManualSite","ProcessedFileID"})
+                        foreach(var name in new[]{"Start_Date","Start_Time","FC_StartDateTime","Initial_Volume","Payment_Type","Sale_Type","Sale_Auth","Authorizer","Preset_Amount","Level","UnitPrice","IsManualSite","ProcessedFileID"})
                             if(!row.IsNull(name))throw new Exception("Unsupported sale field fabricated: "+name);
                     }
                     Check(true,"all 100 sale values, product IDs, source timestamps and unsupported NULL fields verified");
@@ -110,10 +111,14 @@ WHERE r.EntityType='ATG' AND r.SiteID IN(1191,1192)
                 try{store.Process("local-validation/duplicate-"+batch+"-0","different",mutated,AlsonParser.Parse(mutated),batch);throw new Exception("Mutation accepted.");}
                 catch(InvalidOperationException ex)when(ex.Message.Contains("changed content")){}
                 Check(true,"same filename with changed content preserves original audit and fails");
-                var validationBody=AlsonChecks.Envelope("#00,2147483003,81C3C8CBD19,0@,1,R,1,2,2,3,12:00:00,2026-11-07,No|");
-                var validationFrame=AlsonParser.Parse(validationBody);
-                var inserted=store.Process("local-validation/null-default-"+batch,"validation",validationBody,validationFrame,batch);
-                Check(inserted.Rows==1&&Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Fintech_Transactions t JOIN dbo.Alson_Fintech_Rows r ON r.TargetID=t.ID AND r.SiteID=t.Site_ID JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=r.FrameHash WHERE f.BatchID=@batch AND r.EntityType='TXN' AND t.IsManualSite IS NULL",("@batch",batch)))==1,"new runtime inserts explicitly keep IsManualSite NULL despite the table default");
+                foreach(var item in new[]{(Code:"H",Grade:1,Name:"Excellium"),(Code:"R",Grade:2,Name:"Hi Super"),(Code:"D",Grade:3,Name:"Diesel")})
+                {
+                    int saleID=2147483003+item.Grade;
+                    var validationBody=AlsonChecks.Envelope($"#00,{saleID},81C3C8CBD19,0@,1,{item.Code},1,2,2,3,12:00:00,2026-11-07,No|");
+                    var validationFrame=AlsonParser.Parse(validationBody);
+                    var inserted=store.Process("local-validation/grade-"+batch+"-"+item.Code,"validation",validationBody,validationFrame,batch);
+                    Check(inserted.Rows==1&&Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Fintech_Transactions t JOIN dbo.Alson_Fintech_Rows r ON r.TargetID=t.ID AND r.SiteID=t.Site_ID JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=r.FrameHash WHERE f.BatchID=@batch AND r.EntityType='TXN' AND t.IsManualSite IS NULL AND t.Final_Volume=3 AND t.Sale_ID=@sale AND t.Grade_ID=@grade AND t.Article=@name",("@batch",batch),("@sale",saleID),("@grade",item.Grade),("@name",item.Name)))==1,$"new runtime saves {item.Code} -> Alson grade {item.Grade} {item.Name}, Sale_ID and totalizer correctly");
+                }
             }
         }
         finally

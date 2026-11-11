@@ -15,6 +15,12 @@ hierarchy.Root.AddAppender(new ConsoleAppender { Layout = new PatternLayout("%da
 hierarchy.Root.Level = log4net.Core.Level.Info;
 hierarchy.Configured = true;
 
+if(args.Contains("--alson-archive-processed"))
+{
+    await FintechEtl.FunctionApp.Alson.AlsonArchiveCommand.Run(args);
+    return;
+}
+
 // Explicit bounded local Alson runner. Never invokes Dover or sends a local email.
 if (args.Contains("--alson-scan"))
 {

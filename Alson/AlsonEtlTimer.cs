@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text;
+using System.Security.Cryptography;
 using Azure.Storage.Blobs;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -14,6 +15,7 @@ public sealed class AlsonEtlTimer(ILogger<AlsonEtlTimer> log)
         public int Examined {get;set;}
         public int Sales {get;set;}
         public int TankReadings {get;set;}
+        public int Archived {get;set;}
         public Dictionary<string,int> Outcomes {get;set;}=[];
         public void Count(string outcome)=>Outcomes[outcome]=Outcomes.GetValueOrDefault(outcome)+1;
     }
@@ -40,6 +42,7 @@ public sealed class AlsonEtlTimer(ILogger<AlsonEtlTimer> log)
         if(!settings.DryRun)store.BeginBatch(summary.BatchID);
         var options=new BlobClientOptions();options.Retry.MaxRetries=2;options.Retry.NetworkTimeout=TimeSpan.FromSeconds(20);
         var container=new BlobContainerClient(settings.Blob,settings.Container,options);
+        var archive=new AlsonArchive(new AlsonBlobArchiveStorage(container));
         var evidence=new List<object>();int atgFrames=0;var stopwatch=System.Diagnostics.Stopwatch.StartNew();
         var dryHashes=new HashSet<string>(StringComparer.Ordinal);
         var masterSales=new Dictionary<string,int>(StringComparer.Ordinal);
@@ -54,7 +57,18 @@ public sealed class AlsonEtlTimer(ILogger<AlsonEtlTimer> log)
             if(!leaf.Contains("-TRANSACTION-",StringComparison.Ordinal)&&!leaf.Contains("-ATG-DATA-",StringComparison.Ordinal)&&!leaf.StartsWith("PY-",StringComparison.Ordinal))continue;
             var source=Convert.ToHexString(AlsonStore.SourceKey(settings.Container,item.Name));var etag=item.Properties.ETag?.ToString()??"";
             var fileMaster=item.Name[settings.Prefix.Length..].Split('-')[0];
-            if(terminal.TryGetValue(source,out var prior)&&prior==etag)continue;
+            if(terminal.TryGetValue(source,out var prior))
+            {
+                if(!settings.DryRun&&prior.ArchiveEligible&&settings.Masters.Contains(prior.Master))
+                {
+                    if(summary.Examined>=settings.MaxFiles)break;
+                    await archive.Move(item.Name,prior.EnvelopeHash,ct);
+                    summary.Examined++;summary.Archived++;
+                    evidence.Add(new{Blob=item.Name,Destination=AlsonArchive.Destination(item.Name),Outcome="archive_resumed"});
+                    continue;
+                }
+                if(prior.ETag==etag)continue;
+            }
             if(summary.Sales>=maxSales&&item.Name.Contains("-TRANSACTION-",StringComparison.Ordinal))continue;
             if(atgFrames>=maxAtgFrames&&item.Name.Contains("-ATG-DATA-",StringComparison.Ordinal))continue;
             if(masterSales.GetValueOrDefault(fileMaster)>=salesPerMaster&&item.Name.Contains("-TRANSACTION-",StringComparison.Ordinal))continue;
@@ -81,6 +95,11 @@ public sealed class AlsonEtlTimer(ILogger<AlsonEtlTimer> log)
                     if(frame.Command=="00"){summary.Sales+=result.Rows;masterSales[frame.Master]=masterSales.GetValueOrDefault(frame.Master)+result.Rows;}
                     else {summary.TankReadings+=result.Rows;atgFrames++;masterAtg[frame.Master]=masterAtg.GetValueOrDefault(frame.Master)+1;}
                 }
+                if(!settings.DryRun&&result.Outcome is "imported" or "duplicate")
+                {
+                    await archive.Move(item.Name,SHA256.HashData(body),ct);
+                    summary.Archived++;
+                }
                 evidence.Add(new{Blob=item.Name,Command=frame.Command,Master=frame.Master,Hash=Convert.ToHexString(frame.Hash),result.Outcome,result.Rows,result.Detail});
                 if(summary.Examined%25==0)log.LogInformation("Alson progress: {Examined} files, {Sales} sales, {Tanks} tank readings",summary.Examined,summary.Sales,summary.TankReadings);
             }
@@ -93,8 +112,8 @@ public sealed class AlsonEtlTimer(ILogger<AlsonEtlTimer> log)
             }
             if(summary.Sales>=maxSales&&atgFrames>=maxAtgFrames)break;
         }
-        log.LogInformation("Alson {Mode} batch {Batch}: examined {Examined}, sales {Sales}, tank rows {Tanks}; {Outcomes}",
-            settings.DryRun?"DRY RUN":"IMPORT",summary.BatchID,summary.Examined,summary.Sales,summary.TankReadings,JsonSerializer.Serialize(summary.Outcomes));
+        log.LogInformation("Alson {Mode} batch {Batch}: examined {Examined}, sales {Sales}, tank rows {Tanks}, archived {Archived}; {Outcomes}",
+            settings.DryRun?"DRY RUN":"IMPORT",summary.BatchID,summary.Examined,summary.Sales,summary.TankReadings,summary.Archived,JsonSerializer.Serialize(summary.Outcomes));
         if(manifestPath!=null)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(manifestPath))!);

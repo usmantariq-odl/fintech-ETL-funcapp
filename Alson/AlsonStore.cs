@@ -21,7 +21,7 @@ internal sealed class AlsonStore(AlsonSettings settings)
     internal void VerifySchema()
     {
         using var c = Open();
-        using var cmd = new SqlCommand("SELECT COUNT(*) FROM sys.tables WHERE schema_id=SCHEMA_ID('dbo') AND name IN ('Alson_Fintech_Batches','Alson_Fintech_ProductMap','Alson_Fintech_ProbeConfig','Alson_Fintech_Frames','Alson_Fintech_Rows','Alson_Fintech_Imports')", c);
+        using var cmd = new SqlCommand("SELECT COUNT(*) FROM sys.tables WHERE schema_id=SCHEMA_ID('dbo') AND name IN ('Alson_Fintech_Batches','Alson_Fintech_ProductMap','Alson_Fintech_ProbeConfig','Alson_Fintech_Frames','Alson_Fintech_Rows','Alson_Fintech_Imports') AND COL_LENGTH('dbo.Alson_Fintech_ProductMap','AlsonGradeID') IS NOT NULL", c);
         if (Convert.ToInt32(cmd.ExecuteScalar()) != 6) throw new InvalidOperationException("Apply reviewed Alson migration before enabling this trigger.");
     }
     internal void BeginBatch(Guid batch)
@@ -29,12 +29,25 @@ internal sealed class AlsonStore(AlsonSettings settings)
         using var c = Open(); using var cmd = new SqlCommand("INSERT dbo.Alson_Fintech_Batches(BatchID,Kind) VALUES(@id,'import')",c);
         cmd.Parameters.AddWithValue("@id",batch); cmd.ExecuteNonQuery();
     }
-    internal Dictionary<string,string> TerminalSources()
+    internal sealed record TerminalSource(string ETag,string Outcome,byte[] EnvelopeHash,string Master)
     {
-        using var c=Open(); using var cmd=new SqlCommand("SELECT SourceKey,SourceETag FROM dbo.Alson_Fintech_Imports WHERE Outcome IN ('imported','duplicate','unsupported','excluded','invalid')",c);
-        using var r=cmd.ExecuteReader(); var found=new Dictionary<string,string>(StringComparer.Ordinal);
-        while(r.Read()) found[Convert.ToHexString((byte[])r[0])]=r.IsDBNull(1)?"":r.GetString(1);
+        internal bool ArchiveEligible=>Outcome is "imported" or "duplicate";
+    }
+    internal Dictionary<string,TerminalSource> TerminalSources()
+    {
+        using var c=Open(); using var cmd=new SqlCommand("SELECT i.SourceKey,i.SourceETag,i.Outcome,i.EnvelopeHash,f.MasterId FROM dbo.Alson_Fintech_Imports i LEFT JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=i.FrameHash WHERE i.Outcome IN ('imported','duplicate','unsupported','excluded','invalid')",c);
+        using var r=cmd.ExecuteReader(); var found=new Dictionary<string,TerminalSource>(StringComparer.Ordinal);
+        while(r.Read())found[Convert.ToHexString((byte[])r[0])]=new(r.IsDBNull(1)?"":r.GetString(1),r.GetString(2),(byte[])r[3],r.IsDBNull(4)?"":r.GetString(4));
         return found;
+    }
+    internal sealed record ArchiveCandidate(string BlobName,byte[] EnvelopeHash,string Master);
+    internal List<ArchiveCandidate> ArchiveCandidates()
+    {
+        using var c=Open();using var cmd=new SqlCommand("SELECT i.BlobName,i.EnvelopeHash,f.MasterId FROM dbo.Alson_Fintech_Imports i JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=i.FrameHash WHERE i.Outcome IN ('imported','duplicate') ORDER BY i.BlobName",c);
+        using var r=cmd.ExecuteReader();var list=new List<ArchiveCandidate>();
+        while(r.Read())if(settings.Masters.Contains(r.GetString(2))&&r.GetString(0).StartsWith(AlsonArchive.Inbox,StringComparison.Ordinal))
+            list.Add(new(r.GetString(0),(byte[])r[1],r.GetString(2)));
+        return list;
     }
     internal static byte[] SourceKey(string container,string blob)=>SHA256.HashData(Encoding.UTF8.GetBytes(container+"/"+blob));
     internal Result Validate(string name,string etag,byte[] envelope,AlsonFrame frame)
@@ -100,17 +113,19 @@ WHERE MasterId COLLATE Latin1_General_100_BIN2=@master AND AlsonPumpCode COLLATE
 AND FC_NozzleID=@nozzle AND Omni_SiteID=@site AND FC_SiteID=@fc
 """,("@master",frame.Master),("@code",frame.Dispenser),("@nozzle",frame.Nozzle),("@site",siteId),("@fc",fcSite));
             var product=Configuration(c,tx,!commit,"""
-SELECT p.product_id,p.product_name FROM dbo.Alson_Fintech_ProductMap m
+SELECT m.AlsonGradeID,p.product_name FROM dbo.Alson_Fintech_ProductMap m
 JOIN dbo.Omni_Fintech_Products p ON p.Id=m.ProductRowID AND p.OmniCustomerID_FK=m.CustomerID
 WHERE m.CustomerID=@customer AND m.RawCode=@code
 """,("@customer",site["Customer_Id_FK"]),("@code",frame.Product));
             if(Value(pump,"FC_PumpID")==null||Value(pump,"FC_NozzleID")==null)throw new AlsonPendingException("Missing numeric pump/nozzle mapping.");
+            if(Value(product,"AlsonGradeID")==null||Convert.ToInt32(product["AlsonGradeID"])<=0)
+                throw new AlsonPendingException("Alson product code has no configured AlsonGradeID.");
             using var sale=Command(c,tx,"""
-INSERT dbo.Fintech_Transactions(Site_ID,FC_SiteID,Sale_ID,Pump_ID,Hose_ID,Grade_ID,Article,Volume,Money,PPU,End_Date,End_Time,FC_EndDateTime,CreatedOn,CreatedBy,IsManualSite)
-OUTPUT INSERTED.ID VALUES(@site,@fc,@sale,@pump,@hose,@grade,@article,@volume,@money,@ppu,@date,@time,@at,SYSUTCDATETIME(),'AlsonETL',NULL)
+INSERT dbo.Fintech_Transactions(Site_ID,FC_SiteID,Sale_ID,Pump_ID,Hose_ID,Grade_ID,Article,Volume,Money,PPU,End_Date,End_Time,FC_EndDateTime,CreatedOn,CreatedBy,IsManualSite,Final_Volume)
+OUTPUT INSERTED.ID VALUES(@site,@fc,@sale,@pump,@hose,@grade,@article,@volume,@money,@ppu,@date,@time,@at,SYSUTCDATETIME(),'AlsonETL',NULL,@final)
 """,("@site",siteId),("@fc",fcSite),("@sale",int.Parse(frame.RecordId,CultureInfo.InvariantCulture)),("@pump",pump["FC_PumpID"]),("@hose",pump["FC_NozzleID"]),
-                ("@grade",product["product_id"]),("@article",product["product_name"]),("@volume",(double)frame.Volume.Value),("@money",(double)frame.Amount.Value),("@ppu",(double)frame.Price.Value),
-                ("@date",frame.At.Date),("@time",frame.At.TimeOfDay),("@at",frame.At));
+                ("@grade",product["AlsonGradeID"]),("@article",product["product_name"]),("@volume",(double)frame.Volume.Value),("@money",(double)frame.Amount.Value),("@ppu",(double)frame.Price.Value),
+                ("@date",frame.At.Date),("@time",frame.At.TimeOfDay),("@at",frame.At),("@final",(double)frame.Totalizer.Value));
             if(commit)Link("TXN",Convert.ToInt32(pump["ID"]),Convert.ToInt32(sale.ExecuteScalar()));count=1;
         }
         else foreach(var probe in frame.Probes)

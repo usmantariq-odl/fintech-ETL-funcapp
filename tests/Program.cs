@@ -35,7 +35,7 @@ if (args.Contains("--live-provisioning-check"))
 }
 
 var log = LogManager.GetLogger("RegressionTests");
-int passed = SqlBatchChecks.Run() + SftpRecoveryChecks.Run() + SiteFolderAdoptionChecks.Run() + AlsonChecks.Run();
+int passed = SqlBatchChecks.Run() + SftpRecoveryChecks.Run() + SiteFolderAdoptionChecks.Run() + AlsonChecks.Run() + AlsonArchiveChecks.Run();
 void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
 void Throws<T>(Action action) where T : Exception
 {

@@ -13,10 +13,14 @@ CREATE TABLE dbo.Alson_Fintech_Batches (
 IF OBJECT_ID(N'dbo.Alson_Fintech_ProductMap',N'U') IS NULL
 CREATE TABLE dbo.Alson_Fintech_ProductMap (
  CustomerID int NOT NULL, RawCode varchar(8) COLLATE Latin1_General_100_BIN2 NOT NULL,
- ProductRowID int NOT NULL, BatchID uniqueidentifier NOT NULL,
+ ProductRowID int NOT NULL, AlsonGradeID int NULL, BatchID uniqueidentifier NOT NULL,
  PRIMARY KEY(CustomerID,RawCode), FOREIGN KEY(ProductRowID) REFERENCES dbo.Omni_Fintech_Products(Id),
  FOREIGN KEY(BatchID) REFERENCES dbo.Alson_Fintech_Batches(BatchID)
 );
+IF COL_LENGTH(N'dbo.Alson_Fintech_ProductMap',N'AlsonGradeID') IS NULL
+ ALTER TABLE dbo.Alson_Fintech_ProductMap ADD AlsonGradeID int NULL;
+IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'dbo.Alson_Fintech_ProductMap') AND name=N'UX_Alson_ProductMap_CustomerGrade')
+ EXEC(N'CREATE UNIQUE INDEX UX_Alson_ProductMap_CustomerGrade ON dbo.Alson_Fintech_ProductMap(CustomerID,AlsonGradeID) WHERE AlsonGradeID IS NOT NULL');
 IF OBJECT_ID(N'dbo.Alson_Fintech_ProbeConfig',N'U') IS NULL
 CREATE TABLE dbo.Alson_Fintech_ProbeConfig (
  MasterId nvarchar(64) COLLATE Latin1_General_100_BIN2 NOT NULL,

@@ -35,11 +35,11 @@ try {
   if((Query 'SELECT COUNT(*) FROM dbo.Omni_Fintech_SiteMapping WHERE FC_SiteID IN (560257,560256)' -Scalar) -ne 0){throw 'External FC site IDs already mapped.'}
   if((Query "SELECT COUNT(*) FROM dbo.Omni_Fintech_AlsonSiteMaster WHERE MasterId IN ('81C3C8CBD19','81C3C8CD7C3','81C3C8CE581','81C3C8CD824')" -Scalar) -ne 0){throw 'Source master already mapped. Do not reassign automatically.'}
   Query "INSERT dbo.Alson_Fintech_Batches(BatchID,Kind) VALUES(@batch,'configuration')" @{batch=$batch}
-  foreach($product in @(@{Code='R';Grade=1;Name='Hi Super'},@{Code='D';Grade=2;Name='Diesel'},@{Code='H';Grade=3;Name='Excellium'})){
+  foreach($product in @(@{Code='R';Grade=1;AlsonGrade=2;Name='Hi Super'},@{Code='D';Grade=2;AlsonGrade=3;Name='Diesel'},@{Code='H';Grade=3;AlsonGrade=1;Name='Excellium'})){
    $id=Query 'SELECT Id FROM dbo.Omni_Fintech_Products WHERE OmniCustomerID_FK=227 AND product_id=@grade AND product_name=@name' @{grade=$product.Grade;name=$product.Name} -Scalar
    if($null -eq $id -or $id -is [DBNull]){throw 'Expected existing customer product missing'}
    if((Query 'SELECT COUNT(*) FROM dbo.Alson_Fintech_ProductMap WHERE CustomerID=227 AND RawCode=@code' @{code=$product.Code} -Scalar) -ne 0){throw 'Alson product mapping already exists; review its owner before setup'}
-   Query 'INSERT dbo.Alson_Fintech_ProductMap(CustomerID,RawCode,ProductRowID,BatchID) VALUES(227,@code,@product,@batch)' @{code=$product.Code;product=$id;batch=$batch}
+   Query 'INSERT dbo.Alson_Fintech_ProductMap(CustomerID,RawCode,ProductRowID,AlsonGradeID,BatchID) VALUES(227,@code,@product,@alson,@batch)' @{code=$product.Code;product=$id;alson=$product.AlsonGrade;batch=$batch}
   }
   $definitions=@(
    @{Name='Makkah';Code=560257;DSP='81C3C8CBD19';ATG='81C3C8CD7C3';Probes=@('24696','24697','24699','83939');Codes=@('0@','0A','0B','0C','0D','0E','0F','0G','0H','0I','0J','0K')},
