@@ -25,6 +25,18 @@
     "ACS_EMAIL_CONNECTION_STRING": "endpoint=https://YOUR_ACS_RESOURCE.communication.azure.com/;accesskey=REPLACE_WITH_SECRET",
     "EMAIL_FROM": "fintechfuel@octopusdtl.com",
     "EMAIL_RECIPIENTS": "kamran.khalid@octopusdtl.com,khurram.mir@octopusdtl.com,ujaved@avanceon.ae,usman.tariq@octopusdtl.com,ameer.hamza@octopusdtl.com",
-    "EtlErrorEmailEnabled": "true"
+    "EtlErrorEmailEnabled": "true",
+    "AlsonEtlEnabled": "false",
+    "AlsonEtlDryRun": "true",
+    "AlsonSqlConnectionString": "Server=YOUR_SERVER;Initial Catalog=FintechStagDB_NewArchitecture;User ID=YOUR_USER;Password=YOUR_PASSWORD;Encrypt=True;",
+    "AlsonExpectedDatabase": "FintechStagDB_NewArchitecture",
+    "AlsonBlobConnectionString": "REPLACE_WITH_SECRET",
+    "AlsonBlobContainer": "sftp-data",
+    "AlsonBlobPrefix": "Alson/inbox/",
+    "AlsonAllowedMasterIds": "81C3C8CBD19,81C3C8CD7C3,81C3C8CE581,81C3C8CD824",
+    "AlsonSourceNotBefore": "2026-11-06",
+    "AlsonMaxFilesPerRun": "100",
+    "AlsonErrorEmailEnabled": "true",
+    "AlsonEmailRecipients": "REPLACE_WITH_APPROVED_RECIPIENTS"
   }
 }

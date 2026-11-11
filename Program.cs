@@ -8,11 +8,34 @@ using System.Text.Json;
 using FintechEtl.FunctionApp;
 using CSVReader;
 using System.Data.SqlClient;
+using Microsoft.Extensions.Logging;
 
 var hierarchy = (Hierarchy)LogManager.GetRepository();
 hierarchy.Root.AddAppender(new ConsoleAppender { Layout = new PatternLayout("%date %-5level %logger - %message%newline%exception") });
 hierarchy.Root.Level = log4net.Core.Level.Info;
 hierarchy.Configured = true;
+
+// Explicit bounded local Alson runner. Never invokes Dover or sends a local email.
+if (args.Contains("--alson-scan"))
+{
+    var path=Path.Combine(Directory.GetCurrentDirectory(),"alson.local.json");
+    using var json=JsonDocument.Parse(File.ReadAllText(path));
+    foreach(var v in json.RootElement.GetProperty("Values").EnumerateObject()) Environment.SetEnvironmentVariable(v.Name,v.Value.GetString());
+    Environment.SetEnvironmentVariable("AlsonEtlEnabled","true");
+    Environment.SetEnvironmentVariable("AlsonErrorEmailEnabled","false");
+    Environment.SetEnvironmentVariable("AlsonEtlDryRun",args.Contains("--apply")?"false":"true");
+    string Option(string name,string fallback){var i=Array.IndexOf(args,name);return i>=0&&i+1<args.Length?args[i+1]:fallback;}
+    int sales=int.Parse(Option("--sales","100")),atg=int.Parse(Option("--atg-frames","25"));
+    if(sales<0||sales>100||atg<0||atg>25)throw new InvalidOperationException("Local Alson runner is limited to 100 sales / 25 ATG frames.");
+    using var loggerFactory=LoggerFactory.Create(builder=>builder.AddSimpleConsole());
+    var logger=loggerFactory.CreateLogger<FintechEtl.FunctionApp.Alson.AlsonEtlTimer>();
+    var runner=new FintechEtl.FunctionApp.Alson.AlsonEtlTimer(logger);
+    var summary=await runner.Scan(FintechEtl.FunctionApp.Alson.AlsonSettings.Load(),new FintechEtl.FunctionApp.Alson.AlsonAlerts(logger),CancellationToken.None,
+        sales,atg,Option("--manifest",Path.Combine("artifacts","alson","last-run.json")),50,13,TimeSpan.FromMinutes(15));
+    Console.WriteLine(JsonSerializer.Serialize(summary));
+    if(summary.Sales!=sales||summary.TankReadings!=atg*4) Environment.ExitCode=2;
+    return;
+}
 
 // Explicit test sends only to the fixed test recipient; it never processes files or connects to SQL/SFTP.
 if (args.Contains("--test-error-email") || args.Contains("--preview-error-email"))
