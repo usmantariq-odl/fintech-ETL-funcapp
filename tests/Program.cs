@@ -2,6 +2,11 @@ using System.Text;
 using FintechAutoSiteConfiguration.FunctionApp.Storage;
 using Microsoft.Extensions.Options;
 
+if(args.Contains("--validate-live-con"))
+{
+    await LiveConValidation.Run(args[1],args[2]);return;
+}
+
 if (args.Contains("--email-outbox-check"))
 {
     await LiveEmailOutboxCheck.Run();

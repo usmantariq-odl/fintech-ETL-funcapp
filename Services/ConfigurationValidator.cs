@@ -25,7 +25,7 @@ internal static class ConfigurationValidator
             errors.Add("Grade numbers must be positive and unique; grade names must be non-empty and unique.");
 
         DocumentNodeResponse? Grade(string? value) => grades.Find(g =>
-            string.Equals(g.Name, value?.Trim(), StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(g.Name?.Trim(), value?.Trim(), StringComparison.OrdinalIgnoreCase) ||
             (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) && g.Number == number));
 
         foreach (var tank in tanks)

@@ -18,6 +18,28 @@ internal static class AutoSiteEmailChecks
                 || AutoSiteErrorEmails.MissingMappingMarkerName("scope/events/", "001057", "db") == AutoSiteErrorEmails.MissingMappingMarkerName("scope/events/", "001057", "otherdb"))
                 throw new Exception("Per-site notification identity ignores site/database or mishandles leading zeros.");
             Console.WriteLine("PASS AutoSite error template preserves site IDs, redacts credentials and encodes diagnostics.");
+            var oldEnvironment=Environment.GetEnvironmentVariable("EtlEnvironment");
+            var oldAlias=Environment.GetEnvironmentVariable("ETLEnviornment");
+            try
+            {
+                foreach(var (value,label) in new[]{("Production","PROD"),(" staging ","STAG"),("prod","PROD"),("STAG","STAG")})
+                {
+                    Environment.SetEnvironmentVariable("EtlEnvironment",value);
+                    var rendered=AutoSiteErrorEmails.Render(notification,"Fintech-Stag-AutoSiteConfig",false);
+                    if(!rendered.Subject.Contains("Fintech AutoSite "+label)||!rendered.Text.Contains("Application: Fintech AutoSite "+label)||!rendered.Html.Contains("Fintech AutoSite "+label))
+                        throw new Exception("AutoSite environment label inconsistent across subject/body/HTML.");
+                }
+                Environment.SetEnvironmentVariable("EtlEnvironment",null);
+                Environment.SetEnvironmentVariable("ETLEnviornment","Production");
+                if(!AutoSiteErrorEmails.Render(notification,"old-app",false).Subject.Contains("Fintech AutoSite PROD"))throw new Exception("Requested environment alias not supported.");
+                if(AutoSiteErrorEmails.AlertApplicationName("old-app",null)!="old-app")throw new Exception("Missing environment must retain application label.");
+                Console.WriteLine("PASS AutoSite PROD/STAG labels follow configured environment across subject, text and HTML.");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("EtlEnvironment",oldEnvironment);
+                Environment.SetEnvironmentVariable("ETLEnviornment",oldAlias);
+            }
         }
         finally { Environment.SetEnvironmentVariable("AutoSiteEmailConnectionString", old); }
     }

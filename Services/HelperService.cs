@@ -120,8 +120,8 @@ Grades in the CON file: {string.Join(", ", grades.Select(g => g.Name))}");
                     Id = int.TryParse((string?)x.Attribute("ID"), out _) ? (int?)x.Attribute("ID") : 0,
                     Tank_Suction_Id = (string?)x.Attribute("ID"),
                     Number = (int?)x.Element("number"),
-                    Name = (string?)x.Element("name"),
-                    ProductName = (string?)x.Element("product"),
+                    Name = ((string?)x.Element("name"))?.Trim(),
+                    ProductName = ((string?)x.Element("product"))?.Trim(),
                     HoseQuantity = (int?)x.Element("hoses_qty"),
                     TankCapacity = (int?)x.Element("capacity"),
                     Tank_Suction_Mapped_Tank = (int?)x.Element("tank1"),
@@ -129,9 +129,9 @@ Grades in the CON file: {string.Join(", ", grades.Select(g => g.Name))}");
                     .Select(hose => new DocumentNodeHoseResponse
                     {
                         HoseName = hose.Name.LocalName,
-                        Grade = (string?)hose.Element("grade"),
+                        Grade = ((string?)hose.Element("grade"))?.Trim(),
                         RealId = int.TryParse((string?)hose.Element("real_id"), out _) ? (int?)hose.Element("real_id") : null,
-                        MappedTankName = (string?)hose.Element("suction_high")
+                        MappedTankName = ((string?)hose.Element("suction_high"))?.Trim()
                     })
                     .ToList()
                 })

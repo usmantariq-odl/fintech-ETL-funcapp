@@ -55,6 +55,28 @@ internal static class ReconfigurationChecks
             await new SiteConfigurationWriter(sql).ReplaceAsync(Request(), sql.Products, false);
             Check(sql.Committed && !sql.RolledBack && sql.Active && sql.Activations == 0 && sql.Assets.Count == 3 && sql.TankMapping == "new tanks" && sql.PumpMapping == "new pumps", "Valid replacement was incomplete or changed activation.");
         });
+        await Test("Fusion grade-name whitespace resolves tanks and hoses without rewriting source XML", async () =>
+        {
+            var request=Request();
+            request.document.Descendants("name").Single().Value=" Diesel ";
+            request.document.Descendants("product").Single().Value=" Diesel ";
+            request.document.Descendants("grade").Single(x=>!x.HasElements).Value=" Diesel ";
+            request.document.Descendants("suction_high").Single().Value=" 1-Diesel ";
+            string original=request.document.ToString();
+            PopulateNodes(request);
+            var sql=new FakeConfigurationSql();
+            await new SiteConfigurationWriter(sql).ReplaceAsync(request,sql.Products,false);
+            Check(sql.Committed&&sql.Assets.Any(a=>a.AssetName=="Tank_1(Diesel)")&&request.document.ToString()==original,"Whitespace caused a false rejection, inconsistent assets or rewrote the source.");
+        });
+        await Test("Surrounding whitespace does not hide conflicting duplicate grade names", async () =>
+        {
+            var request=Request();
+            request.document.Descendants("grade").Single(x=>x.HasElements).Add(XElement.Parse("<grade_def ID='other'><name> Diesel </name><number>3</number></grade_def>"));
+            PopulateNodes(request);
+            var sql=new FakeConfigurationSql();
+            await Reject(()=>new SiteConfigurationWriter(sql).ReplaceAsync(request,sql.Products,false));
+            Check(sql.Transactions==0&&sql.Clears==0,"Duplicate grade started a destructive replacement.");
+        });
         await Test("New site activation commits only with the complete replacement", async () =>
         {
             var sql = new FakeConfigurationSql { Active = false };

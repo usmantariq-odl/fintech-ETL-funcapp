@@ -262,6 +262,9 @@ internal sealed class AutoSiteErrorEmails : IDisposable
 
     internal static (string Subject, string Text, string Html) Render(AlertDigest digest, string app, bool test)
     {
+        // Presentation only: preserve actual app/slot identity for outbox suppression.
+        app = AlertApplicationName(app, Environment.GetEnvironmentVariable("EtlEnvironment")
+            ?? Environment.GetEnvironmentVariable("ETLEnviornment"));
         var title = test ? "TEST — Fintech AutoSite error notification" : "Fintech AutoSite — processing errors require review";
         var text = new StringBuilder().AppendLine(title).AppendLine($"Application: {app}")
             .AppendLine($"Generated (UTC): {DateTimeOffset.UtcNow:O}")
@@ -283,6 +286,13 @@ internal sealed class AutoSiteErrorEmails : IDisposable
         var subject = test ? $"[TEST] {app} — AutoSite error notification" : $"[AUTOSITE ALERT] {app} — {firstEvent?.Category} — site {firstEvent?.Site ?? "N/A"}";
         return (subject, plain, RenderHtml(digest, app, test));
     }
+
+    internal static string AlertApplicationName(string app,string environment)=>environment?.Trim().ToUpperInvariant() switch
+    {
+        "PRODUCTION" or "PROD" => "Fintech AutoSite PROD",
+        "STAGING" or "STAG" => "Fintech AutoSite STAG",
+        _ => app
+    };
 
     private static string RenderHtml(AlertDigest digest, string app, bool test)
     {

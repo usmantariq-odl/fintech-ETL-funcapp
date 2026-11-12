@@ -214,3 +214,16 @@ The portal/API is unchanged. An approved reconfiguration (`IsConfigurationAllowe
 On validation or replacement failure, the existing validation-before-write and transaction-rollback behavior preserves the old configuration. If that preexisting configuration was present, the Function sets **IsActive=1** on the existing activation row after rollback, keeps Auto Config Status **Error**, routes the failed CON to **Exception/<siteid>**, and includes the recovery outcome in the error email. It does not create an activation row/pointer or change activation timestamps as a side effect of this recovery. The UPDATE rechecks that the old configuration still exists.
 
 This is the requested fallback policy for a failed reconfiguration with existing configuration; the Function cannot independently reconstruct the activation value before the portal request. A first-time site with no preserved configuration is never activated by this error path. An activation-recovery failure is logged and included in the error email rather than falsely claiming the site is active; normal exception publication is still attempted. No API changes or database-schema changes are required. Deploy the updated AutoSite Function for this behavior. Existing Error files are not automatically replayed or retroactively reactivated just by deployment.
+
+## AutoSite whitespace validation and environment label (12 November 2026)
+
+Surrounding whitespace in CON grade names, tank products and hose references is trimmed
+in parsed values. Original XML/file bytes remain unchanged. Product IDs, duplicate-grade
+checks and complete tank/nozzle mapping validation remain required before any replacement.
+The real site 1111 CON exposed trailing spaces in Rocket Diesel and Super XT Tiger grade names.
+
+Error-email display names follow `EtlEnvironment`, matching the main ETL: Production/Prod
+shows `Fintech AutoSite PROD`; Staging/Stag shows `Fintech AutoSite STAG`. The spelling
+`ETLEnviornment` is accepted as a fallback alias. Missing/unknown values retain the real app
+name. This only changes subject/plain/HTML display labels; the real app/slot still identifies
+the persistent outbox and missing-site suppression records. It never changes the SQL target.
