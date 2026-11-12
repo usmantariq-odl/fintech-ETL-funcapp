@@ -168,3 +168,13 @@ an explicit reviewed JSON filename list via --alson-diagnostics-scan --inputs <f
 by default, --apply commits and archives. Local email sending remains disabled.
 Onboarding snapshots and exact row rollback evidence: artifacts/alson/onboarding-20261112/.
 
+## Unknown-master notices
+
+Unknown masters stay in the inbox. A persistent notification in
+`fintech-alson-alerts/staging/new-master/<master-SHA256>.json` is created conditionally per
+master, delivered through the existing leased outbox, and marked sent after delivery.
+Later files/runs/restarts do not send another notice for that master. Delivery failures
+remain retryable. Existing excluded audits are also discovered on the next scan.
+An allowed master with missing/ambiguous active site configuration uses the same notice
+and stays pending_mapping. Other configuration/data errors retain the normal error digest.
+No database migration is required. Preserve notice blobs to preserve repeat suppression.

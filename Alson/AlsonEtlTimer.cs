@@ -41,6 +41,11 @@ public sealed class AlsonEtlTimer(ILogger<AlsonEtlTimer> log)
         var store=new AlsonStore(settings);store.VerifySchema();
         var summary=new Summary{BatchID=Guid.NewGuid()};
         var terminal=store.TerminalSources();
+        // Rediscover excluded audit rows too: they may predate the notification feature.
+        foreach(var prior in terminal.Values)
+            if(prior.Outcome=="excluded"&&!string.IsNullOrWhiteSpace(prior.Master)&&!settings.Masters.Contains(prior.Master))
+                alerts.UnknownMaster(prior.Master,"Previously excluded inbox file");
+        var masterConfiguration=new Dictionary<string,bool>(StringComparer.Ordinal);
         if(!settings.DryRun)store.BeginBatch(summary.BatchID);
         var options=new BlobClientOptions();options.Retry.MaxRetries=2;options.Retry.NetworkTimeout=TimeSpan.FromSeconds(20);
         var container=new BlobContainerClient(settings.Blob,settings.Container,options);
@@ -98,6 +103,21 @@ public sealed class AlsonEtlTimer(ILogger<AlsonEtlTimer> log)
                 body=(await container.GetBlobClient(item.Name).DownloadContentAsync(ct)).Value.Content.ToArray();
                 summary.Examined++;
                 var frame=AlsonParser.Parse(body);
+                if(!settings.Masters.Contains(frame.Master))alerts.UnknownMaster(frame.Master,item.Name);
+                else
+                {
+                    string type=frame.Command is "00" or "31" or "70"?"DSP":"ATG";
+                    string configKey=frame.Master+"/"+type;
+                    if(!masterConfiguration.TryGetValue(configKey,out var configured))
+                        masterConfiguration[configKey]=configured=store.MasterConfigured(frame.Master,type);
+                    if(!configured)
+                    {
+                        alerts.UnknownMaster(frame.Master,item.Name);
+                        summary.Count("pending_mapping");
+                        if(!settings.DryRun)store.RecordFailure(item.Name,etag,body,"pending_mapping","Master/site configuration missing or ambiguous.",summary.BatchID);
+                        continue;
+                    }
+                }
                 if(diagnosticsOnly&&frame.Diagnostic==null)continue;
                 if(frame.Diagnostic!=null)diagnosticCandidates++;
                 if(frame.Command=="00"&&summary.Sales>=maxSales||frame.Command=="20"&&atgFrames>=maxAtgFrames)continue;

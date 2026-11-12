@@ -92,6 +92,16 @@ internal static class AlsonChecks
             Assert(mail.Subject.Contains("Alson STAGING")&&mail.Text.Contains("FintechStagDB_NewArchitecture"),"Wrong email environment.");
             Assert(!mail.Text.Contains("do-not-expose")&&!mail.Html.Contains("<script>"),"Email leaked secret/HTML.");
         });
+        Test("new-master notifications use persistent master identity, independent of file and run",()=>
+        {
+            string first=AlsonAlerts.MasterNoticeKey("81C3C8CNEW1");
+            Assert(first==AlsonAlerts.MasterNoticeKey("81C3C8CNEW1"),"Same master would enqueue again.");
+            Assert(first!=AlsonAlerts.MasterNoticeKey("81C3C8CNEW2"),"Different masters share a notification.");
+            Assert(!AlsonAlerts.MasterNoticeKey("../unsafe/master").Contains(".."),"Master can escape notice prefix.");
+            var mail=AlsonAlerts.RenderMaster("NEW<MASTER>","Alson/inbox/example.json");
+            Assert(mail.Subject.Contains("new unconfigured master")&&mail.Text.Contains("NEW<MASTER>")&&mail.Text.Contains("not imported"),"Missing discovery details.");
+            Assert(!mail.Html.Contains("NEW<MASTER>"),"Master notice HTML was not encoded.");
+        });
         Test("enabled Alson refuses a production connection without opening SQL",()=>
         {
             string[] keys=["AlsonEtlEnabled","AlsonEtlDryRun","AlsonSqlConnectionString","AlsonExpectedDatabase"];

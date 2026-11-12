@@ -10,6 +10,17 @@ internal sealed partial class AlsonStore(AlsonSettings settings)
 {
     private readonly Dictionary<string,DataRow> previewConfiguration=new(StringComparer.Ordinal);
     internal sealed record Result(string Outcome, int Rows, string Detail = null);
+    internal bool MasterConfigured(string master,string type)
+    {
+        using var c=Open();using var cmd=Command(c,null,"""
+SELECT COUNT(*) FROM dbo.Omni_Fintech_AlsonSiteMaster a
+JOIN dbo.Plant_Site s ON s.Site_Id=a.Omni_SiteID
+JOIN dbo.Omni_Fintech_SiteMapping m ON m.Omni_SiteID=s.Site_Id
+WHERE a.MasterId COLLATE Latin1_General_100_BIN2=@master AND a.DeviceType=@type
+AND a.IsActive=1 AND s.IsActive=1 AND s.DeviceTypeId=3
+""",("@master",master),("@type",type));
+        return Convert.ToInt32(cmd.ExecuteScalar())==1;
+    }
     internal SqlConnection Open()
     {
         var c = new SqlConnection(settings.Sql); c.Open();

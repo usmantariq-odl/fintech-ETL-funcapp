@@ -1,5 +1,7 @@
 using System.Net;
 using System.Text.Json;
+using System.Text;
+using System.Security.Cryptography;
 using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
@@ -13,6 +15,19 @@ namespace FintechEtl.FunctionApp.Alson;
 internal sealed class AlsonAlerts(ILogger log)
 {
     private readonly List<string> errors=[];
+    private readonly Dictionary<string,string> unknownMasters=new(StringComparer.Ordinal);
+    internal void UnknownMaster(string master,string source)=>unknownMasters.TryAdd(master,source);
+    internal static string MasterNoticeKey(string master)=>"staging/new-master/"+
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(master)))+".json";
+    internal static (string Subject,string Text,string Html) RenderMaster(string master,string source)
+    {
+        string text="New unconfigured Alson master found: "+master+
+            "\nDatabase: FintechStagDB_NewArchitecture\nExample: "+source+
+            "\nData is not imported. Original files remain in Alson/inbox. Configure the site/master and mappings, allow the master, and review excluded audits before replay."+
+            "\nThis notification is recorded per master and suppressed on subsequent runs.";
+        return ("[ETL NOTICE] Alson STAGING - new unconfigured master found",text,
+            "<h2>New Alson master</h2><pre>"+WebUtility.HtmlEncode(text)+"</pre>");
+    }
     internal void Add(string source,Exception error)
     {
         log.LogError("Alson {Source}: {Type}: {Message}",source,error.GetType().Name,EtlErrorEmails.Redact(error.Message));
@@ -40,6 +55,12 @@ internal sealed class AlsonAlerts(ILogger log)
             var options=new BlobClientOptions();options.Retry.MaxRetries=1;options.Retry.NetworkTimeout=TimeSpan.FromSeconds(10);
             var container=new BlobContainerClient(storage,"fintech-alson-alerts",options);
             await container.CreateIfNotExistsAsync(cancellationToken:ct);
+            foreach(var (master,source) in unknownMasters)
+            {
+                var notice=container.GetBlobClient(MasterNoticeKey(master));
+                try {await notice.UploadAsync(BinaryData.FromObjectAsJson(new Alert(run,[],master,source)),overwrite:false,cancellationToken:ct);}
+                catch(RequestFailedException ex) when(ex.Status==409) { /* Persistent per-master notification already queued or sent. */ }
+            }
             if(errors.Count>0)
             {
                 var now=DateTime.UtcNow;var bucket=new DateTime(now.Year,now.Month,now.Day,now.Hour,(now.Minute/15)*15,0,DateTimeKind.Utc);
@@ -60,7 +81,7 @@ internal sealed class AlsonAlerts(ILogger log)
                     var props=(await blob.GetPropertiesAsync(cancellationToken:ct)).Value;
                     if(props.Metadata.TryGetValue("sent",out status)&&status=="true")continue;
                     var alert=(await blob.DownloadContentAsync(ct)).Value.Content.ToObjectFromJson<Alert>();
-                    var message=Render(alert.Errors,alert.Run);
+                    var message=alert.Master==null?Render(alert.Errors,alert.Run):RenderMaster(alert.Master,alert.Source);
                     await EtlErrorEmails.Send(acs,recipients,message.Subject,message.Text,message.Html,ct);
                     await blob.SetMetadataAsync(new Dictionary<string,string>{{"sent","true"}},new BlobRequestConditions{LeaseId=leaseId},ct);
                 }
@@ -70,5 +91,5 @@ internal sealed class AlsonAlerts(ILogger log)
         catch(Exception ex) when(!ct.IsCancellationRequested)
         {log.LogError("Alson error-email outbox failure: {Type}: {Message}. Pending persisted alerts remain retryable.",ex.GetType().Name,EtlErrorEmails.Redact(ex.Message));}
     }
-    private sealed record Alert(string Run,string[] Errors);
+    private sealed record Alert(string Run,string[] Errors,string Master=null,string Source=null);
 }
