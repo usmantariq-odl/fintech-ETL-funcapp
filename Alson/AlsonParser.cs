@@ -5,11 +5,13 @@ using System.Text.Json;
 
 namespace FintechEtl.FunctionApp.Alson;
 
-internal sealed record AlsonProbe(string Code, decimal Fuel, decimal Water, decimal Temperature);
+internal sealed record AlsonProbe(string Code, decimal Fuel, decimal Water, decimal Temperature, int Position = 0);
+internal sealed record AlsonDiagnostic(IReadOnlyList<string> Channels,string Status,string StatusValue=null,int? ModeCode=null,string SlaveCode=null,int? Nozzle=null);
 internal sealed record AlsonFrame(string Command, string Master, string RecordId, DateTime At, byte[] Hash,
     string Raw, byte[] Bytes, string Dispenser = null, int? Nozzle = null, string Product = null,
     decimal? Volume = null, decimal? Amount = null, decimal? Price = null, decimal? Totalizer = null,
-    IReadOnlyList<AlsonProbe> Probes = null);
+    IReadOnlyList<AlsonProbe> Probes = null, AlsonDiagnostic Diagnostic = null,
+    DateTimeOffset? GatewayReceivedAt = null, string MessageId = null);
 internal sealed class AlsonPendingException(string message) : Exception(message);
 
 internal static class AlsonParser
@@ -32,7 +34,17 @@ internal static class AlsonParser
         if (!frame.StartsWith('#') || !frame.EndsWith('|') || frame.Count(c => c == '|') != 1)
             throw new FormatException("Frame must have one #...| boundary with no appended modem commands.");
         var content = frame[1..^1]; var parts = content.Split(','); var cmd = parts[0];
-        if (cmd is not ("00" or "20")) return new(cmd, "", "", DateTime.MinValue, hash, raw, bytes);
+        if (cmd is not ("00" or "20" or "31" or "70" or "13" or "27")) return new(cmd, "", "", DateTime.MinValue, hash, raw, bytes);
+        DateTimeOffset? received=null;
+        if(Text("gatewayTs") is string gateway)
+        {
+            if(!DateTimeOffset.TryParse(gateway,CultureInfo.InvariantCulture,DateTimeStyles.None,out var parsed)||
+               !(gateway.EndsWith('Z')||System.Text.RegularExpressions.Regex.IsMatch(gateway,@"[+-]\d{2}:\d{2}$")))
+                throw new FormatException("Invalid gateway receipt timestamp.");
+            received=parsed.ToUniversalTime();
+        }
+        string messageId=Text("messageId");
+        if(messageId?.Length>128)throw new FormatException("Message ID too long.");
         string Id(string value)
         {
             if (string.IsNullOrWhiteSpace(value) || value.Length > 64 || value != value.Trim())
@@ -56,6 +68,40 @@ internal static class AlsonParser
                 DateTimeStyles.None, out var at) || at.Year < 1753) throw new FormatException("Invalid source date/time.");
             return DateTime.SpecifyKind(at, DateTimeKind.Unspecified);
         }
+        if(cmd=="31")
+        {
+            if(parts.Length is not(9 or 11)||parts[2]!="31")throw new FormatException("Unknown auto/manual layout.");
+            if(!int.TryParse(parts[5],out var mode)||mode is not(1 or 3))throw new FormatException("Unknown operating mode.");
+            int? nozzle=null;
+            if(parts.Length==11)
+            {
+                if(!int.TryParse(parts[8],NumberStyles.None,CultureInfo.InvariantCulture,out var n)||n<=0)throw new FormatException("Invalid mode-event nozzle.");
+                nozzle=n;
+            }
+            var at=parts.Length==9?At(parts[8],parts[7]):At(parts[6],parts[7]);
+            return new(cmd,Id(parts[1]),Id(parts[3]),at,hash,raw,bytes,
+                Diagnostic:new([Id(parts[4])],mode==3?"Auto":"Manual",ModeCode:mode,SlaveCode:parts[parts.Length==9?6:9],Nozzle:nozzle),
+                GatewayReceivedAt:received,MessageId:messageId);
+        }
+        if(cmd=="70")
+        {
+            if(parts.Length<5||parts[2]!="70")throw new FormatException("Incomplete dispenser connection.");
+            var channels=parts[3..^1].Select(Id).Distinct(StringComparer.Ordinal).ToArray();
+            return new(cmd,Id(parts[1]),"",DateTime.MinValue,hash,raw,bytes,
+                Diagnostic:new(channels,Id(parts[^1])),GatewayReceivedAt:received,MessageId:messageId);
+        }
+        if(cmd=="13")
+        {
+            if(parts.Length!=3)throw new FormatException("ATG connection requires master and status.");
+            return new(cmd,Id(parts[1]),"",DateTime.MinValue,hash,raw,bytes,
+                Diagnostic:new([],Id(parts[2])),GatewayReceivedAt:received,MessageId:messageId);
+        }
+        if(cmd=="27")
+        {
+            if(parts.Length!=5)throw new FormatException("Probe status requires master,probe,type,value.");
+            return new(cmd,Id(parts[1]),Id(parts[2]),DateTime.MinValue,hash,raw,bytes,
+                Diagnostic:new([],Id(parts[3]),StatusValue:Id(parts[4])),GatewayReceivedAt:received,MessageId:messageId);
+        }
         if (cmd == "00")
         {
             if (parts.Length != 13) throw new FormatException("Sale requires 13 fields.");
@@ -65,7 +111,7 @@ internal static class AlsonParser
             var volume = Number(parts[6]); var price = Number(parts[7]); var amount = Number(parts[8]); var total = Number(parts[9]);
             if (volume < 0 || price < 0 || amount < 0 || total < 0) throw new FormatException("Negative sale measurement.");
             return new(cmd, Id(parts[2]), Id(parts[1]), At(parts[11], parts[10]), hash, raw, bytes,
-                Id(parts[3]), nozzle, Id(parts[5]), volume, amount, price, total);
+                Id(parts[3]), nozzle, Id(parts[5]), volume, amount, price, total,GatewayReceivedAt:received,MessageId:messageId);
         }
         var groups = content.Split('~');
         var header = groups[0].Split(','); var probes = new List<AlsonProbe>();
@@ -83,7 +129,7 @@ internal static class AlsonParser
                 var f = groups[i].Split(',');
                 if (f.Length != 4) throw new FormatException("Probe requires code,fuel,water,temperature.");
                 if (f[0].Equals("FFFFF", StringComparison.OrdinalIgnoreCase)) continue;
-                probes.Add(new(Id(f[0]), Number(f[1]), Number(f[2]), Number(f[3])));
+                probes.Add(new(Id(f[0]), Number(f[1]), Number(f[2]), Number(f[3]),i));
             }
         }
         if (probes.Count == 0 || probes.Any(p => p.Code.Equals("FFFFF", StringComparison.OrdinalIgnoreCase)) ||
@@ -91,6 +137,6 @@ internal static class AlsonParser
             throw new FormatException("Missing, unused-only or repeated probes.");
         if (probes.Any(p => p.Fuel < 0 || p.Water < 0)) throw new FormatException("Negative tank reading.");
         RecordId(header[1]);
-        return new(cmd, Id(header[2]), Id(header[1]), At(header[4], header[3]), hash, raw, bytes, Probes: probes);
+        return new(cmd, Id(header[2]), Id(header[1]), At(header[4], header[3]), hash, raw, bytes, Probes: probes,GatewayReceivedAt:received,MessageId:messageId);
     }
 }

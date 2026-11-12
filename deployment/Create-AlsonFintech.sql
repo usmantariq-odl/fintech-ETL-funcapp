@@ -12,15 +12,18 @@ CREATE TABLE dbo.Alson_Fintech_Batches (
 );
 IF OBJECT_ID(N'dbo.Alson_Fintech_ProductMap',N'U') IS NULL
 CREATE TABLE dbo.Alson_Fintech_ProductMap (
- CustomerID int NOT NULL, RawCode varchar(8) COLLATE Latin1_General_100_BIN2 NOT NULL,
+ CustomerID int NOT NULL, OmniSiteID int NOT NULL, RawCode varchar(8) COLLATE Latin1_General_100_BIN2 NOT NULL,
  ProductRowID int NOT NULL, AlsonGradeID int NULL, BatchID uniqueidentifier NOT NULL,
- PRIMARY KEY(CustomerID,RawCode), FOREIGN KEY(ProductRowID) REFERENCES dbo.Omni_Fintech_Products(Id),
+ PRIMARY KEY(CustomerID,OmniSiteID,RawCode), FOREIGN KEY(ProductRowID) REFERENCES dbo.Omni_Fintech_Products(Id),
+ FOREIGN KEY(OmniSiteID) REFERENCES dbo.Plant_Site(Site_Id),
  FOREIGN KEY(BatchID) REFERENCES dbo.Alson_Fintech_Batches(BatchID)
 );
 IF COL_LENGTH(N'dbo.Alson_Fintech_ProductMap',N'AlsonGradeID') IS NULL
  ALTER TABLE dbo.Alson_Fintech_ProductMap ADD AlsonGradeID int NULL;
-IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'dbo.Alson_Fintech_ProductMap') AND name=N'UX_Alson_ProductMap_CustomerGrade')
- EXEC(N'CREATE UNIQUE INDEX UX_Alson_ProductMap_CustomerGrade ON dbo.Alson_Fintech_ProductMap(CustomerID,AlsonGradeID) WHERE AlsonGradeID IS NOT NULL');
+IF COL_LENGTH(N'dbo.Alson_Fintech_ProductMap',N'OmniSiteID') IS NULL
+ THROW 51002,'Apply the reviewed Upgrade-AlsonSiteProducts migration for a legacy customer-only map.',1;
+IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'dbo.Alson_Fintech_ProductMap') AND name=N'UX_Alson_ProductMap_SiteGrade')
+ EXEC(N'CREATE UNIQUE INDEX UX_Alson_ProductMap_SiteGrade ON dbo.Alson_Fintech_ProductMap(CustomerID,OmniSiteID,AlsonGradeID) WHERE AlsonGradeID IS NOT NULL');
 IF OBJECT_ID(N'dbo.Alson_Fintech_ProbeConfig',N'U') IS NULL
 CREATE TABLE dbo.Alson_Fintech_ProbeConfig (
  MasterId nvarchar(64) COLLATE Latin1_General_100_BIN2 NOT NULL,

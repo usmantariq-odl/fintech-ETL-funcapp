@@ -2,7 +2,8 @@
 
 No dashboard, API or reporting procedure changes were made for this task.
 
-Raw Alson transactions now store H=1 Excellium, R=2 Hi Super, D=3 Diesel in Grade_ID.
+Raw Alson transactions and ATG Product_Number now use site-specific native grades:
+Makkah H=1 Excellium,D=2 Diesel,R=3 Hi Super; Manzoor H=1 Excellium,R=2 Hi Super,D=3 Diesel.
 Article holds the correct shared product name. The original customer227 product definitions
 remain product_id1 Hi Super,2 Diesel,3 Excellium. ProductMap.ProductRowID links to those
 existing definition rows; AlsonGradeID is a separate vendor-specific key.
@@ -10,7 +11,7 @@ existing definition rows; AlsonGradeID is a separate vendor-specific key.
 ## Required lookup rule
 
 For an Alson site (current DeviceTypeId3), resolve transaction Grade_ID against
-Alson_Fintech_ProductMap.AlsonGradeID for the site's customer, then join ProductRowID to
+Alson_Fintech_ProductMap.AlsonGradeID for the site's customer AND OmniSiteID, then join ProductRowID to
 Omni_Fintech_Products.Id. For Dover keep the existing customer + product_id lookup.
 Never fall back to the shared numeric ID for an unmapped Alson grade, because that produces
 a plausible but incorrect label. Article can be used as the raw sale's known name.
@@ -34,7 +35,7 @@ cannot mean the same product for both sources. Do not change original customer p
   passes requestModel.gradeId as the product filter to transaction/reconciliation APIs.
 * FintechDashboard/src/app/shared/services/tank.service.ts:131:
   resolves grade IDs through the supplied shared grade list; review this before using
-  Alson-native numbers for tanks. ATG products are still unassigned and were not changed.
+  Alson-native numbers for tanks. ATG products/capacities and nozzle/tank links are now assigned from the forms.
 
 ## SQL/reporting paths to adapt later
 
@@ -51,8 +52,8 @@ the user chooses to activate it and complete the remaining portal/configuration 
 
 ## Completed within the ETL task
 
-Only Alson ProductMap schema/configuration and the 100 linked Alson transaction Grade_IDs
-were changed in staging. Shared product rows were snapshot-checked unchanged. No target
-schema change, no Dover row update, no tank-product change or report rebuild. Migration,
-pre-change backups, test evidence and the updated rollback manifest are in deployment/
-and artifacts/alson/grades-update/ respectively.
+The 12 November onboarding update made ProductMap site-specific, populated eight tank
+products/capacities and 24 nozzle/tank links, corrected raw sales grades and physical tank
+numbers, and added separate diagnostic ingestion. Shared product definitions and target table
+schemas were unchanged. Physical dispenser-unit grouping is still unconfirmed. No dashboard,
+API, reporting procedure, or aggregation rebuild was changed or run.

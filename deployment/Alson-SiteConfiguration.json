@@ -1,0 +1,290 @@
+[
+  {
+    "Name": "Makkah",
+    "Code": 560257,
+    "DSP": "81C3C8CBD19",
+    "ATG": "81C3C8CD7C3",
+    "SourceDocument": "Alsons_Onboarding_Conifg_Form_Octopus_Makkah_Kar.docx",
+    "Grades": [
+      {
+        "Code": "H",
+        "Name": "Excellium",
+        "AlsonGradeID": 1
+      },
+      {
+        "Code": "D",
+        "Name": "Diesel",
+        "AlsonGradeID": 2
+      },
+      {
+        "Code": "R",
+        "Name": "Hi Super",
+        "AlsonGradeID": 3
+      }
+    ],
+    "Tanks": [
+      {
+        "Number": 1,
+        "ProbeCode": "24696",
+        "Product": "Hi Super",
+        "Capacity": 22423,
+        "DimensionsMm": "2741 *3800",
+        "NozzleColour": "Blue"
+      },
+      {
+        "Number": 2,
+        "ProbeCode": "24699",
+        "Product": "Hi Super",
+        "Capacity": 22423,
+        "DimensionsMm": "2741*3800",
+        "NozzleColour": "Blue"
+      },
+      {
+        "Number": 3,
+        "ProbeCode": "24697",
+        "Product": "Hi Super",
+        "Capacity": 13365,
+        "DimensionsMm": "2738 *2270",
+        "NozzleColour": "Blue"
+      },
+      {
+        "Number": 4,
+        "ProbeCode": "83939",
+        "Product": "Diesel",
+        "Capacity": 13365,
+        "DimensionsMm": "2738*2270",
+        "NozzleColour": "Black"
+      }
+    ],
+    "Channels": [
+      {
+        "Number": 1,
+        "Code": "0@",
+        "Nozzle": 1,
+        "Tank": 3,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 2,
+        "Code": "0A",
+        "Nozzle": 1,
+        "Tank": 3,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 3,
+        "Code": "0B",
+        "Nozzle": 1,
+        "Tank": 2,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 4,
+        "Code": "0C",
+        "Nozzle": 1,
+        "Tank": 2,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 5,
+        "Code": "0D",
+        "Nozzle": 1,
+        "Tank": 2,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 6,
+        "Code": "0E",
+        "Nozzle": 1,
+        "Tank": 2,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 7,
+        "Code": "0F",
+        "Nozzle": 1,
+        "Tank": 1,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 8,
+        "Code": "0G",
+        "Nozzle": 1,
+        "Tank": 1,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 9,
+        "Code": "0H",
+        "Nozzle": 1,
+        "Tank": 1,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 10,
+        "Code": "0I",
+        "Nozzle": 1,
+        "Tank": 1,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 11,
+        "Code": "0J",
+        "Nozzle": 1,
+        "Tank": 4,
+        "Product": "Diesel"
+      },
+      {
+        "Number": 12,
+        "Code": "0K",
+        "Nozzle": 1,
+        "Tank": 4,
+        "Product": "Diesel"
+      }
+    ]
+  },
+  {
+    "Name": "Manzoor",
+    "Code": 560256,
+    "DSP": "81C3C8CE581",
+    "ATG": "81C3C8CD824",
+    "SourceDocument": "Alsons_Onboarding_Conifg_Form_Octopus_Manzoor.docx",
+    "Grades": [
+      {
+        "Code": "H",
+        "Name": "Excellium",
+        "AlsonGradeID": 1
+      },
+      {
+        "Code": "R",
+        "Name": "Hi Super",
+        "AlsonGradeID": 2
+      },
+      {
+        "Code": "D",
+        "Name": "Diesel",
+        "AlsonGradeID": 3
+      }
+    ],
+    "Tanks": [
+      {
+        "Number": 1,
+        "ProbeCode": "00002",
+        "Product": "Hi Super",
+        "Capacity": 31259,
+        "DimensionsMm": "2738*5309",
+        "NozzleColour": "Blue"
+      },
+      {
+        "Number": 2,
+        "ProbeCode": "00009",
+        "Product": "Excellium",
+        "Capacity": 13401,
+        "DimensionsMm": "2738*2276",
+        "NozzleColour": "Red"
+      },
+      {
+        "Number": 3,
+        "ProbeCode": "00004",
+        "Product": "Hi Super",
+        "Capacity": 13401,
+        "DimensionsMm": "2738*2276",
+        "NozzleColour": "Blue"
+      },
+      {
+        "Number": 4,
+        "ProbeCode": "00007",
+        "Product": "Diesel",
+        "Capacity": 13401,
+        "DimensionsMm": "2738*2276",
+        "NozzleColour": "Black"
+      }
+    ],
+    "Channels": [
+      {
+        "Number": 1,
+        "Code": "0@",
+        "Nozzle": 1,
+        "Tank": 4,
+        "Product": "Diesel"
+      },
+      {
+        "Number": 2,
+        "Code": "0A",
+        "Nozzle": 1,
+        "Tank": 4,
+        "Product": "Diesel"
+      },
+      {
+        "Number": 3,
+        "Code": "0B",
+        "Nozzle": 1,
+        "Tank": 3,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 4,
+        "Code": "0C",
+        "Nozzle": 1,
+        "Tank": 3,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 5,
+        "Code": "0D",
+        "Nozzle": 1,
+        "Tank": 3,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 6,
+        "Code": "0E",
+        "Nozzle": 1,
+        "Tank": 3,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 7,
+        "Code": "0F",
+        "Nozzle": 1,
+        "Tank": 1,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 8,
+        "Code": "0G",
+        "Nozzle": 1,
+        "Tank": 1,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 9,
+        "Code": "0H",
+        "Nozzle": 1,
+        "Tank": 1,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 10,
+        "Code": "0I",
+        "Nozzle": 1,
+        "Tank": 1,
+        "Product": "Hi Super"
+      },
+      {
+        "Number": 17,
+        "Code": "0P",
+        "Nozzle": 1,
+        "Tank": 2,
+        "Product": "Excellium"
+      },
+      {
+        "Number": 18,
+        "Code": "0Q",
+        "Nozzle": 1,
+        "Tank": 2,
+        "Product": "Excellium"
+      }
+    ]
+  }
+]

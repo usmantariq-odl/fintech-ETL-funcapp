@@ -27,7 +27,7 @@ internal static class LiveAlsonChecks
             Check(Before()==before,"second-probe mapping failure rolls back first target insert");
             Check(Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Alson_Fintech_Frames WHERE FrameHash=@hash",("@hash",frame.Hash)))==0,"failed multi-probe frame leaves no dedup reservation");
             Check(Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Alson_Fintech_Rows r JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=r.FrameHash WHERE f.BatchID=@batch",("@batch",batch)))==0,"failed frame leaves no output links");
-            raw="#20,2147483001,81C3C8CD7C3,12:00:00,2026-11-07~24696,1234,5,32.25~24697,2345,6,100.01~1|";
+            raw="#20,2147483001,81C3C8CD7C3,12:00:00,2026-11-07~24696,1234,5,32.25~24699,2345,6,100.01~1|";
             body=AlsonChecks.Envelope(raw);frame=AlsonParser.Parse(body);
             try{store.Process("local-validation/temperature-"+batch,"validation",body,frame,batch);throw new Exception("Invalid temperature accepted.");}
             catch(FormatException){}
@@ -37,6 +37,17 @@ internal static class LiveAlsonChecks
             try{store.Process("local-validation/bounds-"+batch,"validation",body,frame,batch);throw new Exception("Extreme reading accepted.");}
             catch(FormatException){}
             Check(Before()==before,"extreme fuel value rejected without business data");
+            raw="#20,2147483010,81C3C8CD7C3,12:00:00,2026-11-07~24699,1234,5,32.25~24696,2345,6,33.25~1|";
+            body=AlsonChecks.Envelope(raw);frame=AlsonParser.Parse(body);
+            try{store.Process("local-validation/order-"+batch,"validation",body,frame,batch);throw new Exception("Changed physical probe order accepted.");}
+            catch(AlsonPendingException){}
+            Check(Before()==before,"unexpected probe ordering is retained for configuration review without inserting readings");
+            var salesBefore=Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Fintech_Transactions WHERE Site_ID IN(1191,1192)"));
+            body=AlsonChecks.Envelope("#00,2147483030,81C3C8CBD19,0J,1,R,1,2,2,3,12:00:00,2026-11-07,No|");
+            frame=AlsonParser.Parse(body);
+            try{store.Process("local-validation/nozzle-product-"+batch,"validation",body,frame,batch);throw new Exception("Sale product mismatch accepted.");}
+            catch(AlsonPendingException){}
+            Check(Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Fintech_Transactions WHERE Site_ID IN(1191,1192)"))==salesBefore,"sale product/tank mismatch is retained for configuration review");
             var count=Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Alson_Fintech_Frames WHERE CommandCode='00'"));
             if(count>0)
             {
@@ -65,7 +76,8 @@ WHERE r.EntityType='TXN' AND r.SiteID IN(1191,1192)
                            Convert.ToInt32(row["Hose_ID"])!=saleReading.Nozzle||
                            (DateTime)row["FC_EndDateTime"]!=saleReading.At)
                             throw new Exception("Sale differs from original frame/mapping.");
-                        int grade=saleReading.Product switch{"R"=>2,"D"=>3,"H"=>1,_=>throw new Exception("Unknown product")};
+                        bool makkah=Convert.ToInt32(row["Site_ID"])==1191;
+                        int grade=saleReading.Product switch{"R"=>makkah?3:2,"D"=>makkah?2:3,"H"=>1,_=>throw new Exception("Unknown product")};
                         if(Convert.ToInt32(row["Grade_ID"])!=grade)throw new Exception("Wrong product grade.");
                         foreach(var name in new[]{"Start_Date","Start_Time","FC_StartDateTime","Initial_Volume","Payment_Type","Sale_Type","Sale_Auth","Authorizer","Preset_Amount","Level","UnitPrice","IsManualSite","ProcessedFileID"})
                             if(!row.IsNull(name))throw new Exception("Unsupported sale field fabricated: "+name);
@@ -73,10 +85,13 @@ WHERE r.EntityType='TXN' AND r.SiteID IN(1191,1192)
                     Check(true,"all 100 sale values, product IDs, source timestamps and unsupported NULL fields verified");
                 }
                 using(var cmd=new SqlCommand("""
-SELECT t.*,f.RawFrame,q.ProbeCode FROM dbo.Alson_Fintech_Rows r
+SELECT t.*,f.RawFrame,q.ProbeCode,m.FC_TankID,p.product_name ExpectedProduct,pm.AlsonGradeID ExpectedGrade FROM dbo.Alson_Fintech_Rows r
 JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=r.FrameHash
 JOIN dbo.Fintech_TankLevels t ON t.ID=r.TargetID AND t.Site_ID=r.SiteID
 JOIN dbo.Alson_Fintech_ProbeConfig q ON q.TankMappingID=r.MappingID
+JOIN dbo.Omni_Fintech_TankMapping m ON m.ID=r.MappingID
+JOIN dbo.Omni_Fintech_Products p ON p.OmniCustomerID_FK=227 AND p.product_id=m.ProdID_FK
+JOIN dbo.Alson_Fintech_ProductMap pm ON pm.CustomerID=227 AND pm.OmniSiteID=t.Site_ID AND pm.ProductRowID=p.Id
 WHERE r.EntityType='ATG' AND r.SiteID IN(1191,1192)
 """,c))
                 using(var adapter=new SqlDataAdapter(cmd))
@@ -90,9 +105,12 @@ WHERE r.EntityType='ATG' AND r.SiteID IN(1191,1192)
                         if(Math.Abs(Convert.ToDouble(row["Product_Volume"])-(double)probe.Fuel)>1e-8||
                            Math.Abs(Convert.ToDouble(row["Water_Volume"])-(double)probe.Water)>1e-8||
                            Math.Abs(Convert.ToDouble(row["Product_Temperature"])-(double)probe.Temperature)>1e-8||
-                           (DateTime)row["FC_TimeStamp"]!=tankFrame.At||Convert.ToInt32(row["Tank_ID"])!=int.Parse(probe.Code))
+                           (DateTime)row["FC_TimeStamp"]!=tankFrame.At||Convert.ToInt32(row["Tank_ID"])!=probe.Position||
+                           Convert.ToInt32(row["Tank_ID"])!=Convert.ToInt32(row["FC_TankID"])||
+                           Convert.ToInt32(row["Product_Number"])!=Convert.ToInt32(row["ExpectedGrade"])||
+                           (string)row["Product_ID"]!=(string)row["ExpectedProduct"])
                             throw new Exception("ATG differs from original frame/configuration.");
-                        foreach(var name in new[]{"Product_Height","Water_Height","Product_Number","Product_ID","Last_Trans_ID","Product_Density","Product_Weight","Ullage","ProcessedFileID","Delivered_Volume"})
+                        foreach(var name in new[]{"Product_Height","Water_Height","Last_Trans_ID","Product_Density","Product_Weight","Ullage","ProcessedFileID","Delivered_Volume"})
                             if(!row.IsNull(name))throw new Exception("Unsupported ATG field fabricated: "+name);
                     }
                     Check(true,"all 100 fuel/water volumes, temperatures, probes, timestamps and unsupported NULL fields verified");
@@ -111,13 +129,18 @@ WHERE r.EntityType='ATG' AND r.SiteID IN(1191,1192)
                 try{store.Process("local-validation/duplicate-"+batch+"-0","different",mutated,AlsonParser.Parse(mutated),batch);throw new Exception("Mutation accepted.");}
                 catch(InvalidOperationException ex)when(ex.Message.Contains("changed content")){}
                 Check(true,"same filename with changed content preserves original audit and fails");
-                foreach(var item in new[]{(Code:"H",Grade:1,Name:"Excellium"),(Code:"R",Grade:2,Name:"Hi Super"),(Code:"D",Grade:3,Name:"Diesel")})
+                foreach(var item in new[]{
+                    (Site:1191,Master:"81C3C8CBD19",Channel:"0@",Code:"R",Grade:3,Name:"Hi Super"),
+                    (Site:1191,Master:"81C3C8CBD19",Channel:"0J",Code:"D",Grade:2,Name:"Diesel"),
+                    (Site:1192,Master:"81C3C8CE581",Channel:"0P",Code:"H",Grade:1,Name:"Excellium"),
+                    (Site:1192,Master:"81C3C8CE581",Channel:"0B",Code:"R",Grade:2,Name:"Hi Super"),
+                    (Site:1192,Master:"81C3C8CE581",Channel:"0@",Code:"D",Grade:3,Name:"Diesel")})
                 {
-                    int saleID=2147483003+item.Grade;
-                    var validationBody=AlsonChecks.Envelope($"#00,{saleID},81C3C8CBD19,0@,1,{item.Code},1,2,2,3,12:00:00,2026-11-07,No|");
+                    int saleID=2147483003+item.Grade+(item.Site==1191?0:10);
+                    var validationBody=AlsonChecks.Envelope($"#00,{saleID},{item.Master},{item.Channel},1,{item.Code},1,2,2,3,12:00:00,2026-11-07,No|");
                     var validationFrame=AlsonParser.Parse(validationBody);
-                    var inserted=store.Process("local-validation/grade-"+batch+"-"+item.Code,"validation",validationBody,validationFrame,batch);
-                    Check(inserted.Rows==1&&Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Fintech_Transactions t JOIN dbo.Alson_Fintech_Rows r ON r.TargetID=t.ID AND r.SiteID=t.Site_ID JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=r.FrameHash WHERE f.BatchID=@batch AND r.EntityType='TXN' AND t.IsManualSite IS NULL AND t.Final_Volume=3 AND t.Sale_ID=@sale AND t.Grade_ID=@grade AND t.Article=@name",("@batch",batch),("@sale",saleID),("@grade",item.Grade),("@name",item.Name)))==1,$"new runtime saves {item.Code} -> Alson grade {item.Grade} {item.Name}, Sale_ID and totalizer correctly");
+                    var inserted=store.Process("local-validation/grade-"+batch+"-"+item.Site+"-"+item.Code,"validation",validationBody,validationFrame,batch);
+                    Check(inserted.Rows==1&&Convert.ToInt32(Scalar("SELECT COUNT(*) FROM dbo.Fintech_Transactions t JOIN dbo.Alson_Fintech_Rows r ON r.TargetID=t.ID AND r.SiteID=t.Site_ID JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=r.FrameHash WHERE f.BatchID=@batch AND r.EntityType='TXN' AND t.Site_ID=@site AND t.IsManualSite IS NULL AND t.Final_Volume=3 AND t.Sale_ID=@sale AND t.Grade_ID=@grade AND t.Article=@name",("@batch",batch),("@site",item.Site),("@sale",saleID),("@grade",item.Grade),("@name",item.Name)))==1,$"site {item.Site} stores {item.Code} as grade {item.Grade} {item.Name} with correct Sale_ID/totalizer");
                 }
             }
         }

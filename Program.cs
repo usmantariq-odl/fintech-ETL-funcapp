@@ -21,6 +21,29 @@ if(args.Contains("--alson-archive-processed"))
     return;
 }
 
+if(args.Contains("--alson-diagnostics-scan"))
+{
+    using(var j=JsonDocument.Parse(File.ReadAllText("alson.local.json")))
+        foreach(var v in j.RootElement.GetProperty("Values").EnumerateObject())Environment.SetEnvironmentVariable(v.Name,v.Value.GetString());
+    Environment.SetEnvironmentVariable("AlsonEtlEnabled","true");
+    Environment.SetEnvironmentVariable("AlsonEtlDryRun",args.Contains("--apply")?"false":"true");
+    Environment.SetEnvironmentVariable("AlsonErrorEmailEnabled","false");
+    Environment.SetEnvironmentVariable("AlsonMaxFilesPerRun","100");
+    string Option(string name,string fallback){int i=Array.IndexOf(args,name);return i>=0&&i+1<args.Length?args[i+1]:fallback;}
+    string inputFile=Option("--inputs",null);
+    if(inputFile==null)throw new InvalidOperationException("A reviewed --inputs JSON filename array is required for the local diagnostic test.");
+    var inputs=JsonSerializer.Deserialize<string[]>(File.ReadAllText(inputFile))!.ToHashSet(StringComparer.Ordinal);
+    if(inputs.Count is <1 or >100||inputs.Any(n=>!n.StartsWith("Alson/inbox/",StringComparison.Ordinal)))throw new InvalidOperationException("Select 1..100 inbox files.");
+    using var factory=LoggerFactory.Create(builder=>builder.AddSimpleConsole());
+    var logger=factory.CreateLogger<FintechEtl.FunctionApp.Alson.AlsonEtlTimer>();
+    var runner=new FintechEtl.FunctionApp.Alson.AlsonEtlTimer(logger);
+    var summary=await runner.Scan(FintechEtl.FunctionApp.Alson.AlsonSettings.Load(),new FintechEtl.FunctionApp.Alson.AlsonAlerts(logger),CancellationToken.None,
+        manifestPath:Option("--manifest",Path.Combine("artifacts","alson","diagnostics-last-run.json")),runBudget:TimeSpan.FromMinutes(10),diagnosticsOnly:true,selectedInputs:inputs);
+    Console.WriteLine(JsonSerializer.Serialize(summary));
+    if(summary.Outcomes.GetValueOrDefault("invalid")+summary.Outcomes.GetValueOrDefault("pending_mapping")>0)Environment.ExitCode=2;
+    return;
+}
+
 // Explicit bounded local Alson runner. Never invokes Dover or sends a local email.
 if (args.Contains("--alson-scan"))
 {

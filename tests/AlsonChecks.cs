@@ -30,7 +30,7 @@ internal static class AlsonChecks
             for(int i=0;i<25;i++)
             {
                 var f=AlsonParser.Parse(Envelope($"#20,{i:0000},MASTER,12:00:00,2026-11-07~00002,1234,56,31.25~00004,2345,67,32.25~00007,3456,78,33.25~00009,4567,89,34.25~FFFFF,0,0,0~1|"));
-                Assert(f.Probes.Count==4&&f.Probes[0]==new AlsonProbe("00002",1234,56,31.25m),"ATG order/identifier changed.");readings+=f.Probes.Count;
+                Assert(f.Probes.Count==4&&f.Probes[0]==new AlsonProbe("00002",1234,56,31.25m,1),"ATG order/identifier changed.");readings+=f.Probes.Count;
             }
             Assert(readings==100,"Wrong reading count.");
         });
@@ -39,6 +39,11 @@ internal static class AlsonChecks
             var raw="#00,0001,M,0@,1,D,1,2,2,3,12:00:00,2026-11-07,No|";
             var a=AlsonParser.Parse(Envelope(raw));var b=AlsonParser.Parse(JsonSerializer.SerializeToUtf8Bytes(new{rawFrame=raw,messageId="different-name"}));
             Assert(a.Hash.SequenceEqual(b.Hash),"Envelope affected business identity.");
+        });
+        Test("unused probe slots preserve physical tank positions",()=>
+        {
+            var f=AlsonParser.Parse(Envelope("#20,1,M,12:00:00,2026-11-07~24696,1,0,30~FFFFF,0,0,0~24697,2,0,31~1|"));
+            Assert(f.Probes.Count==2&&f.Probes[0].Position==1&&f.Probes[1].Position==3,"Unused slot shifted the physical tank numbering.");
         });
         Test("reject checksum mismatch and invalid UTF8",()=>
         {
@@ -52,7 +57,25 @@ internal static class AlsonChecks
             Reject("#20,1,M,12:00:00,2026-11-07~,1,2,3~1|");
             Reject("#20,1,M,12:00:00,2026-11-07~00002,1,2,3~1|AT+QMTPUB");
         });
-        Test("flat ATG and unsupported control messages",()=>
+        Test("diagnostic fields and receipt identities preserve repeated heartbeats",()=>
+        {
+            var mode=AlsonParser.Parse(Envelope("#31,M,31,0002,A,1,1,10:01:32,2026-11-07|"));
+            Assert(mode.Diagnostic.ModeCode==1&&mode.Diagnostic.Status=="Manual"&&mode.Diagnostic.Nozzle==null&&mode.Diagnostic.Channels[0]=="A","Mode fields changed.");
+            var conn=AlsonParser.Parse(Envelope("#70,M,70,P,Q,Alive|"));
+            Assert(conn.Diagnostic.Channels.SequenceEqual(new[]{"P","Q"})&&conn.Diagnostic.Status=="Alive","Connection channels lost.");
+            var probe=AlsonParser.Parse(Envelope("#27,M,00004,STAT,2|"));
+            Assert(probe.RecordId=="00004"&&probe.Master=="M"&&probe.Diagnostic.StatusValue=="2","Probe status changed.");
+            var raw="#13,M,con|";
+            AlsonFrame Receipt(string id)=>AlsonParser.Parse(JsonSerializer.SerializeToUtf8Bytes(new{rawFrame=raw,messageId=id,gatewayTs="2026-11-07T12:00:00+05:00"}));
+            var a=Receipt("a");var b=Receipt("b");var sourceA=SHA256.HashData([1]);var sourceB=SHA256.HashData([2]);
+            Assert(a.GatewayReceivedAt==DateTimeOffset.Parse("2026-11-07T07:00:00Z"),"Receipt timestamp offset changed.");
+            Assert(a.Hash.SequenceEqual(b.Hash)&&!AlsonStore.DiagnosticReceiptKey(a,sourceA).SequenceEqual(AlsonStore.DiagnosticReceiptKey(b,sourceA)),"Distinct heartbeats collapsed.");
+            Assert(AlsonStore.DiagnosticReceiptKey(a,sourceA).SequenceEqual(AlsonStore.DiagnosticReceiptKey(a,sourceB)),"Same receipt under another filename duplicated.");
+            var missingId=AlsonParser.Parse(Envelope(raw));
+            Assert(!AlsonStore.DiagnosticReceiptKey(missingId,sourceA).SequenceEqual(AlsonStore.DiagnosticReceiptKey(missingId,sourceB)),"Missing-ID fallback collapsed files.");
+            Reject("#27,M,00004,STAT|");Reject("#13,M,con|AT+X");Reject("#31,M,31,1,A,2,1,10:01:32,2026-11-07|");
+        });
+        Test("flat ATG and operating mode remain separate",()=>
         {
             Assert(AlsonParser.Parse(Envelope("#20,1,M,12:00:00,2026-11-07,00002,123,4,32.5|")).Probes[0].Fuel==123,"Flat ATG wrong.");
             Assert(AlsonParser.Parse(Envelope("#31,M,31,1,A,3,0,12:00:00,2026-11-07|")).Command=="31","Mode event became business data.");

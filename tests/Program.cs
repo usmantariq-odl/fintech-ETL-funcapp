@@ -9,6 +9,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 
 if(args.Contains("--live-alson-check")){LiveAlsonChecks.Run();return;}
+if(args.Contains("--live-alson-diagnostics-check")){LiveAlsonDiagnosticChecks.Run();return;}
 
 if (args.Contains("--email-outbox-check"))
 {

@@ -29,7 +29,9 @@ try{
   if([string]$current -cne [string]$row.Snapshot){throw "Configuration row changed or missing: $($row.Table) ID $($row.ID). Refusing destructive rollback."}
  }
  foreach($table in @('Alson_Fintech_ProductMap','Alson_Fintech_ProbeConfig')){
-  $order=if($table -eq 'Alson_Fintech_ProductMap'){'CustomerID,RawCode'}else{'MasterId,ProbeCode'}
+  $order=if($table -eq 'Alson_Fintech_ProductMap'){
+   if((Query "SELECT COL_LENGTH('dbo.Alson_Fintech_ProductMap','OmniSiteID')" -Scalar) -isnot [DBNull]){'CustomerID,OmniSiteID,RawCode'}else{'CustomerID,RawCode'}
+  }else{'MasterId,ProbeCode'}
   $current=Query "SELECT (SELECT * FROM dbo.[$table] WITH(UPDLOCK,HOLDLOCK) WHERE BatchID=@batch ORDER BY $order FOR JSON PATH,INCLUDE_NULL_VALUES)" @{batch=$batch} -Scalar
   if([string]$current -cne [string]$manifest.CustomSnapshots.$table){throw "Custom configuration changed: $table"}
  }
@@ -49,10 +51,23 @@ try{
   $actual=Query "SELECT COUNT(*) FROM dbo.[$($pair.Table)] WITH(UPDLOCK,HOLDLOCK) WHERE [$($pair.Site)] IN ($ids)" -Scalar
   if($actual -ne $recorded){throw "Untracked later configuration in $($pair.Table)"}
  }
- if($VerifyOnly){$tx.Rollback();Write-Output 'Rollback verification passed: original manifest, configuration rows and linked target rows match. No rows changed.';return}
+ $hasDiagnostics=(Query "SELECT OBJECT_ID('dbo.Alson_Fintech_DiagnosticReceipts','U')" -Scalar) -isnot [DBNull]
+ if($hasDiagnostics){
+  $bad=Query "SELECT COUNT(*) FROM dbo.Alson_Fintech_DiagnosticReceipts r LEFT JOIN dbo.Omni_Fintech_AlsonSiteMaster m ON m.ID=r.MasterMappingID WHERE r.SiteID IN ($ids) AND (m.ID IS NULL OR m.Omni_SiteID<>r.SiteID OR m.MasterId COLLATE Latin1_General_100_BIN2<>r.MasterId COLLATE Latin1_General_100_BIN2)" -Scalar
+  if($bad -ne 0){throw 'Diagnostic ownership mismatch; review before rollback'}
+ }
+ if($VerifyOnly){$tx.Rollback();Write-Output 'Rollback verification passed: original manifest, configuration rows, linked target rows and diagnostic ownership match. No rows changed.';return}
  # Refer only to exact linked identities, never a blanket delete by date or site.
  Query "DELETE t FROM dbo.Fintech_Transactions t JOIN dbo.Alson_Fintech_Rows r ON r.TargetID=t.ID AND r.SiteID=t.Site_ID WHERE r.EntityType='TXN' AND r.SiteID IN ($ids)"
  Query "DELETE t FROM dbo.Fintech_TankLevels t JOIN dbo.Alson_Fintech_Rows r ON r.TargetID=t.ID AND r.SiteID=t.Site_ID WHERE r.EntityType='ATG' AND r.SiteID IN ($ids)"
+ if($hasDiagnostics){
+  Query "SELECT ReceiptKey INTO #OwnDiagnostics FROM dbo.Alson_Fintech_DiagnosticReceipts WHERE SiteID IN ($ids)"
+  foreach($table in @('Alson_Fintech_AutoManualEvents','Alson_Fintech_DspConnectionEvents','Alson_Fintech_AtgConnectionEvents','Alson_Fintech_ProbeStatusEvents')){
+   Query "DELETE e FROM dbo.[$table] e JOIN #OwnDiagnostics r ON r.ReceiptKey=e.ReceiptKey"
+  }
+  Query 'DELETE e FROM dbo.Alson_Fintech_DiagnosticReceipts e JOIN #OwnDiagnostics r ON r.ReceiptKey=e.ReceiptKey'
+  Query "DELETE i FROM dbo.Alson_Fintech_Imports i JOIN dbo.Omni_Fintech_AlsonSiteMaster m ON m.MasterId COLLATE Latin1_General_100_BIN2=i.MasterId COLLATE Latin1_General_100_BIN2 WHERE m.Omni_SiteID IN ($ids) AND i.CommandCode IN('31','70','13','27')"
+ }
  Query "DELETE i FROM dbo.Alson_Fintech_Imports i WHERE i.FrameHash IN (SELECT FrameHash FROM dbo.Alson_Fintech_Rows WHERE SiteID IN ($ids))"
  Query "SELECT DISTINCT FrameHash INTO #OwnFrames FROM dbo.Alson_Fintech_Rows WHERE SiteID IN ($ids);DELETE dbo.Alson_Fintech_Rows WHERE SiteID IN ($ids);DELETE f FROM dbo.Alson_Fintech_Frames f JOIN #OwnFrames x ON x.FrameHash=f.FrameHash WHERE NOT EXISTS(SELECT 1 FROM dbo.Alson_Fintech_Rows r WHERE r.FrameHash=f.FrameHash)"
  Query 'DELETE dbo.Alson_Fintech_ProbeConfig WHERE BatchID=@batch;DELETE dbo.Alson_Fintech_ProductMap WHERE BatchID=@batch' @{batch=$batch}
@@ -69,6 +84,10 @@ try{
      (Query 'SELECT COUNT(*) FROM dbo.Alson_Fintech_ProductMap' -Scalar) -ne 0 -or
      (Query 'SELECT COUNT(*) FROM dbo.Alson_Fintech_ProbeConfig' -Scalar) -ne 0 -or
      (Query "SELECT COUNT(*) FROM dbo.Alson_Fintech_Batches WHERE Kind='configuration'" -Scalar) -ne 0){throw 'Other Alson work exists; retain schema'}
+  if($hasDiagnostics){
+   if((Query 'SELECT COUNT(*) FROM dbo.Alson_Fintech_DiagnosticReceipts' -Scalar) -ne 0){throw 'Other diagnostic receipts exist; retain schema'}
+   Query 'DROP VIEW IF EXISTS dbo.Alson_Fintech_DspLastSeen;DROP VIEW IF EXISTS dbo.Alson_Fintech_ProbeLastSeen;DROP TABLE dbo.Alson_Fintech_AutoManualEvents;DROP TABLE dbo.Alson_Fintech_DspConnectionEvents;DROP TABLE dbo.Alson_Fintech_AtgConnectionEvents;DROP TABLE dbo.Alson_Fintech_ProbeStatusEvents;DROP TABLE dbo.Alson_Fintech_DiagnosticReceipts;'
+  }
   Query 'DROP TABLE dbo.Alson_Fintech_Imports;DROP TABLE dbo.Alson_Fintech_Rows;DROP TABLE dbo.Alson_Fintech_Frames;DROP TABLE dbo.Alson_Fintech_ProbeConfig;DROP TABLE dbo.Alson_Fintech_ProductMap;DROP TABLE dbo.Alson_Fintech_Batches;'
  }
  $tx.Commit();Write-Output "Reverted configuration batch $batch and its unchanged linked raw rows. Schema removed: $RemoveSchema"

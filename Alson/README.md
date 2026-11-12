@@ -6,31 +6,33 @@ deployed to func-fintech-ETL-stag at the user's request. The live host reported 
 AlsonEtlTimer disabled, and both existing functions enabled. Pre-existing non-Alson settings
 were verified unchanged. Original deployed code/settings are backed up under artifacts/alson/deployment.
 Dover settings and processing paths are unchanged. Neither raw target schema is altered.
+Updated deployment verified 12 November 2026: active package matched the reviewed worker DLL,
+host Running, Alson disabled, existing functions enabled, application settings unchanged.
+130 offline regression scenarios, live finance/diagnostic checks, and eight real diagnostic
+files (ten events) passed. The 100 sales and 100 tank readings remain; archive bytes verified.
 
 ## Staging configuration created 11 November 2026
 
 Customer 227 (PARCO GUNVOR): NEW Makkah Site_ID 1191 / FC_SiteID 560257,
 NEW Manzoor Site_ID 1192 / FC_SiteID 560256. Existing inactive Makka FS and test site 1190 are untouched.
 
-* Makkah DSP 81C3C8CBD19, ATG 81C3C8CD7C3; probes 24696,24697,24699,83939.
-* Manzoor DSP 81C3C8CE581, ATG 81C3C8CD824; probes 00002,00004,00007,00009.
-* Each observed raw dispenser channel has a separate pump asset and nozzle-1 asset.
-  Numeric FC_PumpID keys 1..12 are explicitly allocated in the setup script, not hex conversion.
-  `0@ -> 1`, `0A -> 2` agrees with the two pilot screen mappings. Other channel keys are
-  local numeric identifiers, not a claim about physical dispenser grouping (pilot counts 4/5 units).
-* Each probe is configured as its own tank; raw probe text is preserved in Alson_Fintech_ProbeConfig.
-  FC_TankID uses the source numeric tank/probe code, while the generated asset ID is separate.
-* Alson-native grades: H -> 1 Excellium; R -> 2 Hi Super; D -> 3 Diesel, configured in
-  Alson_Fintech_ProductMap.AlsonGradeID. ProductRowID still links to existing shared rows
-  72/70/71 for names. The shared customer product IDs remain unchanged (1 Hi Super,
-  2 Diesel, 3 Excellium). The existing 100 Alson sales were backfilled with their Alson grades.
-  Dashboard/API/report lookups were explicitly left unchanged; see Dashboard-Grade-Followup.md.
-* User confirmed fuel -> Product_Volume and water -> Water_Volume. Raw quantities map directly,
-  with scale 1. Product_Height and Water_Height remain NULL. A configurable raw-value ceiling
-  of 1,000,000 rejects obvious extreme readings; this is not a declared tank capacity.
-* Probe product/capacity, physical dispenser grouping and nozzle-to-tank links are not established
-  by pilot cfg. They remain NULL/unassigned. Sales can load without inventing those links.
-  Complete them before accepting product-based stock/reconciliation and physical inventory views.
+* Makkah DSP 81C3C8CBD19, ATG 81C3C8CD7C3; physical tanks 1–4 map to probes
+  24696,24699,24697,83939 in fixed payload order. Products Hi Super/Hi Super/Hi Super/Diesel;
+  capacities 22423/22423/13365/13365 litres, from the Makkah onboarding form.
+* Manzoor DSP 81C3C8CE581, ATG 81C3C8CD824; tanks 1–4 map to probes
+  00002,00009,00004,00007. Products Hi Super/Excellium/Hi Super/Diesel;
+  capacities 31259/13401/13401/13401 litres, from the Manzoor onboarding form.
+* 24 nozzle/channel mappings now link to their physical tanks. Explicit channel lookup preserves
+  raw identifiers: 0@→1, 0A→2, …, 0K→12, 0P→17, 0Q→18. No hex guessing.
+  Physical dispenser-unit grouping remains unconfirmed; the channel assets are not unit groupings.
+* ProductMap is site-specific: (CustomerID,OmniSiteID,RawCode). Makkah H=1 Excellium,
+  D=2 Diesel,R=3 Hi Super; Manzoor H=1 Excellium,R=2 Hi Super,D=3 Diesel.
+  Shared customer products remain canonical 1 Hi Super,2 Diesel,3 Excellium; ProductRowID
+  links to their unchanged rows. Raw Grade_ID and ATG Product_Number use the site's Alson grade.
+  TankMapping.ProdID_FK remains canonical. Dashboard/API changes are separate follow-up.
+* Fuel→Product_Volume and water→Water_Volume, scale 1. Heights remain NULL.
+  Probe configuration now bounds volumes by actual tank capacity. A changed fixed probe
+  position or sale/tank product mismatch is held as pending_mapping for review.
 * User confirmed totalizer -> Final_Volume on 11 November. Initial_Volume remains NULL.
   The existing 100 transactions were backfilled from their audited raw frames after snapshot checks.
 * Unknown source fields remain NULL; target IsSampled uses its existing default 0.
@@ -61,8 +63,9 @@ the inbox source conditionally on its verified ETag. Never overwrite a conflicti
 An interrupted move resumes from the successful SQL audit without reinserting business rows.
 Dry-runs do not move files. Invalid, excluded, pending-mapping and unsupported inputs remain
 in inbox. The telemetry archive is separate from Alson/outbox/Processed price-command results.
-Skip known control/
-connection filenames without loading them. Older PY-* filenames are parsed to identify type.
+Commands 31 (auto/manual), 70 (DSP connection), 13 (ATG connection), and 27 (probe status)
+are retained in separate diagnostic event tables, related through master mapping/site and
+optional pump/tank mapping. Older PY-* filenames are also parsed. Other controls stay unsupported.
 Validate raw bytes/checksum, strict dates and corrected ATG field order. Exact raw-frame hash
 dedup is independent from the pilot database and target Sale_ID. Different dispensers with the
 same Sale_ID are valid. All target rows, raw frame, row snapshots and source audit commit in one
@@ -128,7 +131,7 @@ and target ID recorded in Alson_Fintech_Rows. Review/verify without changing row
 ```
 
 Stop/disable Alson first for an actual rollback, then pass -Apply. Add -RemoveSchema only to
-remove the six additive metadata tables too, after verifying no independent Alson work remains.
+remove the eleven additive Alson tables and two diagnostic views too, after verifying no independent Alson work remains.
 Rollback checks original configuration and target snapshots and refuses changed, missing,
 archived or untracked rows. It deletes only linked imported identities and recorded new
 configuration IDs. It never resets identity counters or deletes old sites/rows. If later portal
@@ -140,5 +143,28 @@ not a general restore of arbitrary future database edits.
 An existing duplicate-check procedure uses site+sale number and can flag valid Alson sales.
 An older hourly procedure excludes NULL Sale_Type. Their active callers/schedule must be
 checked before rollout. Raw ingestion alone does not complete reconciliation or all portal
-views while product/tank and nozzle/tank configuration is incomplete. No shared reporting job
+views. Physical dispenser-unit grouping and portal acceptance remain outstanding. No shared reporting job
 or stored procedure is changed/run by this implementation.
+
+## Diagnostics added 12 November 2026
+
+Apply Create-AlsonDiagnostics.sql before enabling the updated code. The additive tables are
+Alson_Fintech_DiagnosticReceipts, Alson_Fintech_AutoManualEvents,
+Alson_Fintech_DspConnectionEvents, Alson_Fintech_AtgConnectionEvents and
+Alson_Fintech_ProbeStatusEvents. Raw status, raw bytes, source master and gateway receipt time
+are preserved. STAT 0 means Connected; STAT 2 means Disconnected; other values stay unknown.
+No timeout-based offline classification is applied. An old historical receipt is not evidence
+of current connectivity. DspLastSeen and ProbeLastSeen views expose connection/mode versus data
+timestamps without assigning timeout states. Missing gateway time remains NULL.
+
+Diagnostic dedup uses master+command+messageId (source key when absent), so repeated Alive/con
+frames with different receipt IDs are retained. A retried receipt is imported once. Reuse of
+a message ID with changed raw bytes fails without replacing its original audit. Unknown channels
+remain as raw events with NULL equipment mapping. These events never insert financial rows.
+Successfully committed diagnostic files also move to Alson/Processed with exact bytes intact.
+
+Read-only verification queries: deployment/Check-AlsonSites.sql. Local diagnostic scan requires
+an explicit reviewed JSON filename list via --alson-diagnostics-scan --inputs <file>; preview
+by default, --apply commits and archives. Local email sending remains disabled.
+Onboarding snapshots and exact row rollback evidence: artifacts/alson/onboarding-20261112/.
+
