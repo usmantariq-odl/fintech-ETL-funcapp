@@ -7,6 +7,7 @@ internal sealed record AlsonSettings(string Sql, string Blob, string Container, 
     bool Enabled, bool DryRun, int MaxFiles, DateTime NotBefore, HashSet<string> Masters,
     bool EmailsEnabled, string EmailConnection, string[] EmailRecipients)
 {
+    internal int WorkerCount {get;init;}=4;
     internal static AlsonSettings Load()
     {
         string Get(string key, string fallback = null) => Environment.GetEnvironmentVariable(key) ?? fallback;
@@ -14,6 +15,8 @@ internal sealed record AlsonSettings(string Sql, string Blob, string Container, 
         bool dry = !bool.TryParse(Get("AlsonEtlDryRun", "true"), out var d) || d;
         int max = int.TryParse(Get("AlsonMaxFilesPerRun", "100"), out var n) && n is > 0 and <= 1000 ? n :
             throw new InvalidOperationException("AlsonMaxFilesPerRun must be 1..1000.");
+        int workers=int.TryParse(Get("AlsonWorkerCount","4"),out var w)&&w is >=1 and <=32?w:
+            throw new InvalidOperationException("AlsonWorkerCount must be 1..32.");
         var sql = Get("AlsonSqlConnectionString"); var expected = Get("AlsonExpectedDatabase", "FintechStagDB_NewArchitecture");
         var masters = (Get("AlsonAllowedMasterIds", "") ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
         var date = Get("AlsonSourceNotBefore");
@@ -34,6 +37,6 @@ internal sealed record AlsonSettings(string Sql, string Blob, string Container, 
         if (enabled && emails && (string.IsNullOrWhiteSpace(acs) || recipients.Length == 0))
             throw new InvalidOperationException("Alson error emails enabled but ACS or AlsonEmailRecipients missing.");
         return new(sql, Get("AlsonBlobConnectionString"), container, prefix, expected, enabled, dry, max,
-            parsed ? from : DateTime.MaxValue, masters, emails, acs, recipients);
+            parsed ? from : DateTime.MaxValue, masters, emails, acs, recipients){WorkerCount=workers};
     }
 }

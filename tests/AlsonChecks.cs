@@ -10,6 +10,25 @@ internal static class AlsonChecks
     {
         int passed=0;void Test(string name,Action check){check();passed++;Console.WriteLine("PASS Alson: "+name);}
         void Assert(bool b,string text){if(!b)throw new Exception(text);}
+        Test("tank product uses configured shared ID, including future nonstandard IDs",()=>
+        {
+            var t=new System.Data.DataTable();
+            t.Columns.Add("TargetProductNumber",typeof(int));t.Columns.Add("ProdID_FK",typeof(int));t.Columns.Add("product_name",typeof(string));
+            foreach(int id in new[]{1,2,3,17})
+                Assert(AlsonStore.TankProductNumber(t.Rows.Add(id,id,"Configured product"))==id,"Shared ID changed.");
+            foreach(var r in new[]{t.Rows.Add(DBNull.Value,1,"Missing product"),t.Rows.Add(2,1,"Mismatch"),t.Rows.Add(0,0,"Invalid"),t.Rows.Add(1,1,DBNull.Value)})
+            {
+                bool rejected=false;try{AlsonStore.TankProductNumber(r);}catch(AlsonPendingException){rejected=true;}
+                Assert(rejected,"Invalid tank product was accepted.");
+            }
+        });
+        Test("failure audit binds NULL frame hashes as binary rather than inferred nvarchar",()=>
+        {
+            var missing=AlsonStore.FrameHashParameter(null);
+            Assert(missing.SqlDbType==System.Data.SqlDbType.Binary&&missing.Size==32&&missing.Value==DBNull.Value,"NULL hash has incorrect SQL type.");
+            var hash=SHA256.HashData([1,2,3]);var present=AlsonStore.FrameHashParameter(hash);
+            Assert(present.SqlDbType==System.Data.SqlDbType.Binary&&((byte[])present.Value).SequenceEqual(hash),"Valid hash changed.");
+        });
         void Reject(string frame){try{AlsonParser.Parse(Envelope(frame));}catch(FormatException){return;}throw new Exception("Invalid frame accepted.");}
         Test("100 sales preserve repeated IDs across dispensers, decimals, midnight and source bytes",()=>
         {
@@ -101,6 +120,15 @@ internal static class AlsonChecks
             var mail=AlsonAlerts.RenderMaster("NEW<MASTER>","Alson/inbox/example.json");
             Assert(mail.Subject.Contains("new unconfigured master")&&mail.Text.Contains("NEW<MASTER>")&&mail.Text.Contains("not imported"),"Missing discovery details.");
             Assert(!mail.Html.Contains("NEW<MASTER>"),"Master notice HTML was not encoded.");
+        });
+        Test("HNS directory markers and discovery cursor never enter the email outbox",()=>
+        {
+            Assert(!AlsonAlerts.IsNotificationBlob("staging/discovery",0,true),"HNS discovery directory treated as JSON.");
+            Assert(!AlsonAlerts.IsNotificationBlob("staging/new-master",0,true),"HNS notice directory treated as JSON.");
+            Assert(!AlsonAlerts.IsNotificationBlob("staging/discovery/master-scan-cursor.json",425,false),"Discovery state treated as email.");
+            Assert(!AlsonAlerts.IsNotificationBlob("staging/empty.json",0,false),"Empty file treated as valid notification.");
+            Assert(AlsonAlerts.IsNotificationBlob(AlsonAlerts.MasterNoticeKey("M"),195,false),"Real master notice suppressed.");
+            Assert(AlsonAlerts.IsNotificationBlob("staging/202611121000.json",500,false),"Error digest suppressed.");
         });
         Test("enabled Alson refuses a production connection without opening SQL",()=>
         {

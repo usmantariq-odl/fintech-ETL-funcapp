@@ -28,7 +28,7 @@ NEW Manzoor Site_ID 1192 / FC_SiteID 560256. Existing inactive Makka FS and test
 * ProductMap is site-specific: (CustomerID,OmniSiteID,RawCode). Makkah H=1 Excellium,
   D=2 Diesel,R=3 Hi Super; Manzoor H=1 Excellium,R=2 Hi Super,D=3 Diesel.
   Shared customer products remain canonical 1 Hi Super,2 Diesel,3 Excellium; ProductRowID
-  links to their unchanged rows. Raw Grade_ID and ATG Product_Number use the site's Alson grade.
+  links to their unchanged rows. Transaction Grade_ID uses the site's Alson grade; ATG Product_Number uses the shared Products.product_id configured in TankMapping.ProdID_FK.
   TankMapping.ProdID_FK remains canonical. Dashboard/API changes are separate follow-up.
 * Fuel→Product_Volume and water→Water_Volume, scale 1. Heights remain NULL.
   Probe configuration now bounds volumes by actual tank capacity. A changed fixed probe
@@ -178,3 +178,57 @@ remain retryable. Existing excluded audits are also discovered on the next scan.
 An allowed master with missing/ambiguous active site configuration uses the same notice
 and stays pending_mapping. Other configuration/data errors retain the normal error digest.
 No database migration is required. Preserve notice blobs to preserve repeat suppression.
+
+## Parallel master workers and logs
+
+The timer uses `AlsonWorkerCount` (default 4, valid 1..32), independently of Dover's
+`EtlWorkerCount`. Configured masters scan their own `<master>-` blob prefixes concurrently.
+`AlsonMaxFilesPerRun` remains one total invocation limit, divided across masters; at most
+10 file slots are reserved for unknown-master discovery. Unused partition slots are not
+redistributed. Small caps rotate master selection between minutes. Per-master diagnostic
+budgets still reserve capacity for transactions / ATG readings. One failed master does not
+stop other workers, but the invocation is marked failed afterwards. Existing SQL application
+locks, frame/receipt deduplication and exact-byte archive protections remain unchanged.
+
+HNS storage only accepts `/` as a hierarchy delimiter. Discovery scans one flat-list page
+(up to 5000 names) concurrently with configured workers, saving its continuation token in
+`fintech-alson-alerts/staging/discovery/master-scan-cursor.json`. The outbox excludes this
+state prefix. New-master detection is eventual across pages, not necessarily immediate.
+Discovered masters are validated from real payloads by bounded scans; unknown files stay
+in the inbox and use the persistent per-master notification. A full cursor cycle repeats
+after the last page; conditional state writes preserve a concurrent scanner's update.
+
+Information logs show run/worker/master/batch identity, budgets, every 10-file progress,
+transactions, tank-reading rows, diagnostic rows, archive counts, outcomes, elapsed time,
+and file-limit/time-budget/exhaustion stop reasons. Per-file success details are Debug.
+Listed names are not a complete backlog count. Dry-run `imported` outcomes mean validated
+proposed rows, not committed rows. Failed worker totals can omit earlier commits from that
+worker: use its audit/batch records before replaying anything.
+
+Read-only local preview (no inserts, archive moves, discovery-cursor writes or email):
+`dotnet FintechEtl.FunctionApp.dll --alson-workers-preview --settings <private settings path>`.
+The preview caps the invocation at 20 examined files. Source disappearing between listing
+and download is logged at Debug and skipped, permitting a preview alongside the live timer.
+
+The email-outbox enumerator ignores HNS folder markers (`hdi_isfolder=true`), zero-byte
+entries and non-JSON paths, as well as discovery cursor JSON. Azure's zero-byte
+`staging/discovery` and `staging/new-master` directory blobs are storage metadata, not mails.
+
+Failure-audit SQL parameters explicitly bind nullable FrameHash as binary(32). Passing an
+untyped DBNull through AddWithValue inferred nvarchar and failed audit writes after an
+invalid ATG frame. Rejected parseable envelopes now retain MasterId and CommandCode in the
+audit too. Invalid physical readings remain rejected atomically; no limits were relaxed.
+Opt-in --live-alson-failure-audit-check <private settings path> verifies real SQL failure
+audits with a unique synthetic batch and removes only its test audit/batch afterwards.
+
+ATG product correction (13 November 2026 PKT): tank product numbers now come from the
+customer-scoped shared product joined to the configured tank, not AlsonGradeID.
+Missing/ambiguous products stay pending. The lookup has no hard-coded site or grade IDs.
+Transactions continue to retain their native Alson Grade_ID.
+`deployment/Correct-AlsonTankProductNumbers.sql` defaults to PREVIEW. APPLY corrects
+only audited Alson ATG rows for customer 227 / sites 1191 and 1192 and updates their
+audit snapshots. Before/after numbers are retained in Alson_Fintech_Batches.Manifest
+under Kind=tank-product-fix. ROLLBACK with the same BatchID restores only those numbers,
+refusing rows whose corrected product number changed. Measurements are never updated.
+Stop/revert the new writer before rollback if reverting the deployment too; rollback
+covers the recorded historical correction, not readings imported later.

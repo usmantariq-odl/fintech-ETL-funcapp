@@ -9,6 +9,8 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 
 if(args.Contains("--live-alson-check")){LiveAlsonChecks.Run();return;}
+if(args.Contains("--live-alson-tank-product-check")){LiveAlsonTankProductChecks.Run(args[1]);return;}
+if(args.Contains("--live-alson-failure-audit-check")){LiveAlsonFailureAuditChecks.Run(args[1]);return;}
 if(args.Contains("--live-alson-diagnostics-check")){LiveAlsonDiagnosticChecks.Run();return;}
 
 if (args.Contains("--email-outbox-check"))
@@ -36,7 +38,7 @@ if (args.Contains("--live-provisioning-check"))
 }
 
 var log = LogManager.GetLogger("RegressionTests");
-int passed = SqlBatchChecks.Run() + SftpRecoveryChecks.Run() + SiteFolderAdoptionChecks.Run() + AlsonChecks.Run() + AlsonArchiveChecks.Run();
+int passed = SqlBatchChecks.Run() + SftpRecoveryChecks.Run() + SiteFolderAdoptionChecks.Run() + AlsonChecks.Run() + AlsonArchiveChecks.Run() + AlsonWorkerChecks.Run();
 void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
 void Throws<T>(Action action) where T : Exception
 {

@@ -63,6 +63,7 @@ AND a.IsActive=1 AND s.IsActive=1 AND s.DeviceTypeId=3
     internal static byte[] SourceKey(string container,string blob)=>SHA256.HashData(Encoding.UTF8.GetBytes(container+"/"+blob));
     internal Result Validate(string name,string etag,byte[] envelope,AlsonFrame frame)
         =>Process(name,etag,envelope,frame,Guid.Empty,commit:false);
+    internal static SqlParameter FrameHashParameter(byte[] hash)=>new("@frame",SqlDbType.Binary,32){Value=(object)hash??DBNull.Value};
     private static SqlCommand Command(SqlConnection c,SqlTransaction tx,string text,params (string,object)[] values)
     {
         var cmd=new SqlCommand(text,c,tx){CommandTimeout=60};
@@ -145,14 +146,8 @@ OUTPUT INSERTED.ID VALUES(@site,@fc,@sale,@pump,@hose,@grade,@article,@volume,@m
         }
         else foreach(var probe in frame.Probes)
         {
-            var tank=Configuration(c,tx,!commit,"""
-SELECT q.*,m.FC_TankID,m.Omni_AssetID,m.ProdID_FK,p.product_name,pm.AlsonGradeID SourceProductNumber FROM dbo.Alson_Fintech_ProbeConfig q
-JOIN dbo.Omni_Fintech_TankMapping m ON m.ID=q.TankMappingID
-LEFT JOIN dbo.Omni_Fintech_Products p ON p.product_id=m.ProdID_FK AND p.OmniCustomerID_FK=@customer
-LEFT JOIN dbo.Alson_Fintech_ProductMap pm ON pm.ProductRowID=p.Id AND pm.CustomerID=@customer AND pm.OmniSiteID=m.Omni_SiteID
-WHERE q.MasterId=@master AND q.ProbeCode=@probe AND m.MasterId COLLATE Latin1_General_100_BIN2=@master
-AND m.Omni_SiteID=@site AND m.FC_SiteID=@fc
-""",("@customer",site["Customer_Id_FK"]),("@master",frame.Master),("@probe",probe.Code),("@site",siteId),("@fc",fcSite));
+            var tank=Configuration(c,tx,!commit,TankConfigurationSql,("@customer",site["Customer_Id_FK"]),("@master",frame.Master),("@probe",probe.Code),("@site",siteId),("@fc",fcSite));
+            int productNumber=TankProductNumber(tank);
             if(probe.Position>0&&Convert.ToInt32(tank["FC_TankID"])!=probe.Position)
                 throw new AlsonPendingException("ATG probe order differs from its confirmed physical-tank mapping; review configuration.");
             if(probe.Temperature<Convert.ToDecimal(tank["MinTemperature"])||probe.Temperature>Convert.ToDecimal(tank["MaxTemperature"]))throw new FormatException("Temperature outside configured physical limits.");
@@ -162,7 +157,7 @@ AND m.Omni_SiteID=@site AND m.FC_SiteID=@fc
             using var atg=Command(c,tx,"""
 INSERT dbo.Fintech_TankLevels(Site_ID,FC_SiteID,Tank_ID,Omni_AssetID,Product_Number,Product_ID,Product_Height,Product_Volume,Water_Height,Water_Volume,Product_Temperature,Date_Last_Read,Time_Last_Read,FC_TimeStamp,Time_Stamp,CreatedOn,CreatedBy)
 OUTPUT INSERTED.ID VALUES(@site,@fc,@tank,@asset,@product,@name,@fh,@fv,@wh,@wv,@temperature,@date,@time,@at,@at,SYSUTCDATETIME(),'AlsonETL')
-""",("@site",siteId),("@fc",fcSite),("@tank",tank["FC_TankID"]),("@asset",tank["Omni_AssetID"]),("@product",Value(tank,"SourceProductNumber")),("@name",Value(tank,"product_name")),
+""",("@site",siteId),("@fc",fcSite),("@tank",tank["FC_TankID"]),("@asset",tank["Omni_AssetID"]),("@product",productNumber),("@name",Value(tank,"product_name")),
                 ("@fh",fuelKind=="HEIGHT"?fuel:null),("@fv",fuelKind=="VOLUME"?fuel:null),("@wh",waterKind=="HEIGHT"?water:null),("@wv",waterKind=="VOLUME"?water:null),
                 ("@temperature",(double)probe.Temperature),("@date",frame.At.Date),("@time",frame.At.TimeOfDay),("@at",frame.At));
             if(commit)Link("ATG",Convert.ToInt32(tank["TankMappingID"]),Convert.ToInt32(atg.ExecuteScalar()));count++;
@@ -182,6 +177,24 @@ OUTPUT INSERTED.ID VALUES(@site,@fc,@tank,@asset,@product,@name,@fh,@fv,@wh,@wv,
             else tx.Rollback();return new(outcome,rows,note);
         }
     }
+    // Tank SPs join Product_Number to TankMapping.ProdID_FK / Products.product_id.
+    // AlsonGradeID is site-specific and remains the transaction Grade_ID only.
+    internal const string TankConfigurationSql="""
+SELECT q.*,m.FC_TankID,m.Omni_AssetID,m.ProdID_FK,p.product_name,p.product_id TargetProductNumber FROM dbo.Alson_Fintech_ProbeConfig q
+JOIN dbo.Omni_Fintech_TankMapping m ON m.ID=q.TankMappingID
+LEFT JOIN dbo.Omni_Fintech_Products p ON p.product_id=m.ProdID_FK AND p.OmniCustomerID_FK=@customer
+WHERE q.MasterId=@master AND q.ProbeCode=@probe AND m.MasterId COLLATE Latin1_General_100_BIN2=@master
+AND m.Omni_SiteID=@site AND m.FC_SiteID=@fc
+""";
+    internal static int TankProductNumber(DataRow tank)
+    {
+        if(Value(tank,"TargetProductNumber")==null||Value(tank,"product_name")==null)
+            throw new AlsonPendingException("Tank product has no unique configured customer product.");
+        int number=Convert.ToInt32(tank["TargetProductNumber"]);
+        if(number<=0||number!=Convert.ToInt32(tank["ProdID_FK"]))
+            throw new AlsonPendingException("Tank product number disagrees with the shared product mapping.");
+        return number;
+    }
     private static object Measurement(DataRow row,string prefix,decimal raw)
     {
         if(Value(row,prefix+"Kind")==null)return null;
@@ -195,7 +208,9 @@ OUTPUT INSERTED.ID VALUES(@site,@fc,@tank,@asset,@product,@name,@fh,@fv,@wh,@wv,
 UPDATE dbo.Alson_Fintech_Imports SET SourceETag=@etag,FrameHash=@frame,Outcome=@outcome,ErrorText=@error,BatchID=@batch,MasterId=COALESCE(@master,MasterId),CommandCode=COALESCE(@code,CommandCode),UpdatedOn=SYSUTCDATETIME() WHERE SourceKey=@key;
 IF @@ROWCOUNT=0 INSERT dbo.Alson_Fintech_Imports(SourceKey,BlobName,SourceETag,EnvelopeHash,Envelope,FrameHash,Outcome,ErrorText,BatchID,MasterId,CommandCode)
 VALUES(@key,@name,@etag,@hash,@body,@frame,@outcome,@error,@batch,@master,@code);
-""",("@key",key),("@name",name),("@etag",etag),("@hash",hash),("@body",envelope),("@frame",frameHash),("@outcome",outcome),("@error",error),("@batch",batch),("@master",string.IsNullOrEmpty(master)?null:master),("@code",code?.Length==2?code:null));cmd.ExecuteNonQuery();
+""",("@key",key),("@name",name),("@etag",etag),("@hash",hash),("@body",envelope),("@outcome",outcome),("@error",error),("@batch",batch),("@master",string.IsNullOrEmpty(master)?null:master),("@code",code?.Length==2?code:null));
+        // AddWithValue(DBNull.Value) infers nvarchar, which SQL cannot assign to binary(32).
+        cmd.Parameters.Add(FrameHashParameter(frameHash));cmd.ExecuteNonQuery();
     }
     internal void RecordFailure(string name,string etag,byte[] envelope,string outcome,string error,Guid batch)
     {
@@ -210,6 +225,9 @@ VALUES(@key,@name,@etag,@hash,@body,@frame,@outcome,@error,@batch,@master,@code)
                 if(reader.GetString(1) is "imported" or "duplicate" or "unsupported" or "excluded" or "invalid")return;
             }
         }
-        Audit(c,tx,key,name,etag,hash,envelope,null,outcome,error.Length>4000?error[..4000]:error,batch);tx.Commit();
+        AlsonFrame parsed=null;
+        try{parsed=AlsonParser.Parse(envelope);}
+        catch(Exception ex) when(ex is FormatException or System.Text.Json.JsonException or DecoderFallbackException or OverflowException){}
+        Audit(c,tx,key,name,etag,hash,envelope,null,outcome,error.Length>4000?error[..4000]:error,batch,parsed?.Master,parsed?.Command);tx.Commit();
     }
 }

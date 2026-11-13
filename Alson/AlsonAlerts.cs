@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
+using System.Collections.Concurrent;
 using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
@@ -14,11 +15,14 @@ namespace FintechEtl.FunctionApp.Alson;
 // Never changes Dover settings or sends email from a dry/local validation run.
 internal sealed class AlsonAlerts(ILogger log)
 {
-    private readonly List<string> errors=[];
-    private readonly Dictionary<string,string> unknownMasters=new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<string> errors=new();
+    private readonly ConcurrentDictionary<string,string> unknownMasters=new(StringComparer.Ordinal);
     internal void UnknownMaster(string master,string source)=>unknownMasters.TryAdd(master,source);
     internal static string MasterNoticeKey(string master)=>"staging/new-master/"+
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(master)))+".json";
+    internal static bool IsNotificationBlob(string name,long? size,bool isDirectory)=>
+        !isDirectory&&size>0&&name.EndsWith(".json",StringComparison.OrdinalIgnoreCase)&&
+        !name.StartsWith("staging/discovery/",StringComparison.Ordinal);
     internal static (string Subject,string Text,string Html) RenderMaster(string master,string source)
     {
         string text="New unconfigured Alson master found: "+master+
@@ -31,7 +35,7 @@ internal sealed class AlsonAlerts(ILogger log)
     internal void Add(string source,Exception error)
     {
         log.LogError("Alson {Source}: {Type}: {Message}",source,error.GetType().Name,EtlErrorEmails.Redact(error.Message));
-        if(errors.Count<30)errors.Add(source+": "+EtlErrorEmails.Redact(error.ToString()));
+        if(errors.Count<30)errors.Enqueue(source+": "+EtlErrorEmails.Redact(error.ToString()));
     }
     internal static (string Subject,string Text,string Html) Render(IEnumerable<string> details,string run)
     {
@@ -71,6 +75,8 @@ internal sealed class AlsonAlerts(ILogger log)
             int sent=0;
             await foreach(var item in container.GetBlobsAsync(BlobTraits.Metadata,prefix:"staging/",cancellationToken:ct))
             {
+                bool directory=item.Metadata.TryGetValue("hdi_isfolder",out var folder)&&string.Equals(folder,"true",StringComparison.OrdinalIgnoreCase);
+                if(!IsNotificationBlob(item.Name,item.Properties.ContentLength,directory))continue;
                 if(item.Metadata.TryGetValue("sent",out var status)&&status=="true")continue;
                 if(sent++>=20)break;
                 var blob=container.GetBlobClient(item.Name);var lease=blob.GetBlobLeaseClient();string leaseId;

@@ -15,6 +15,25 @@ hierarchy.Root.AddAppender(new ConsoleAppender { Layout = new PatternLayout("%da
 hierarchy.Root.Level = log4net.Core.Level.Info;
 hierarchy.Configured = true;
 
+// Read-only parallel-worker preview. No business/audit inserts, archive moves or emails.
+if(args.Contains("--alson-workers-preview"))
+{
+    int index=Array.IndexOf(args,"--settings");
+    string path=index>=0&&index+1<args.Length?args[index+1]:"alson.local.json";
+    using(var j=JsonDocument.Parse(File.ReadAllText(path)))
+        foreach(var v in j.RootElement.GetProperty("Values").EnumerateObject())Environment.SetEnvironmentVariable(v.Name,v.Value.GetString());
+    Environment.SetEnvironmentVariable("AlsonEtlEnabled","true");
+    Environment.SetEnvironmentVariable("AlsonEtlDryRun","true");
+    Environment.SetEnvironmentVariable("AlsonErrorEmailEnabled","false");
+    Environment.SetEnvironmentVariable("AlsonMaxFilesPerRun","20");
+    using var factory=LoggerFactory.Create(builder=>builder.AddSimpleConsole());
+    var logger=factory.CreateLogger<FintechEtl.FunctionApp.Alson.AlsonEtlTimer>();
+    var runner=new FintechEtl.FunctionApp.Alson.AlsonEtlTimer(logger);
+    using var timeout=new CancellationTokenSource(TimeSpan.FromMinutes(3));
+    await runner.ScanWorkers(FintechEtl.FunctionApp.Alson.AlsonSettings.Load(),new FintechEtl.FunctionApp.Alson.AlsonAlerts(logger),"local-preview-"+Guid.NewGuid().ToString("N"),timeout.Token);
+    return;
+}
+
 if(args.Contains("--alson-archive-processed"))
 {
     await FintechEtl.FunctionApp.Alson.AlsonArchiveCommand.Run(args);
