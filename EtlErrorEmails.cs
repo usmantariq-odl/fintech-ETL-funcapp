@@ -46,10 +46,11 @@ internal sealed class EtlErrorEmails : IDisposable
     private readonly Task[] writers;
     private readonly Task[] senders;
     private readonly Task recovery;
-    private readonly Func<string[], string, string, string, CancellationToken, Task<string>> sender;
+    private readonly IEtlEmailTransport transport;
+    private readonly Func<DateTimeOffset> clock;
 
     public EtlErrorEmails(ILogger log, string runId,
-        Func<string[], string, string, string, CancellationToken, Task<string>> sendOverride = null, string stateScope = null)
+        IEtlEmailTransport transportOverride = null, string stateScope = null, Func<DateTimeOffset> clock = null)
     {
         this.log = log;
         this.runId = runId;
@@ -58,7 +59,8 @@ internal sealed class EtlErrorEmails : IDisposable
             (Environment.GetEnvironmentVariable("WEBSITE_SLOT_NAME") ?? "Production")))).ToLowerInvariant() + "/events/";
         connection = Environment.GetEnvironmentVariable("ACS_EMAIL_CONNECTION_STRING");
         storage = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
-        sender = sendOverride ?? ((recipients, subject, text, html, ct) => Send(connection, recipients, subject, text, html, ct));
+        transport = transportOverride ?? new AcsEtlEmailTransport(connection);
+        this.clock = clock ?? (() => DateTimeOffset.UtcNow);
         enabled = !string.IsNullOrWhiteSpace(connection)
             && !string.Equals(Environment.GetEnvironmentVariable("EtlErrorEmailEnabled"), "false", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(Environment.GetEnvironmentVariable("EtlDryRun"), "true", StringComparison.OrdinalIgnoreCase);
@@ -90,7 +92,7 @@ internal sealed class EtlErrorEmails : IDisposable
     {
         await foreach (var item in incoming.Reader.ReadAllAsync())
         {
-            var name = prefix + Guid.NewGuid().ToString("N") + ".json";
+            var name = prefix + EventKey(item) + ".json";
             bool saved = false;
             for (var attempt = 1; attempt <= 3 && !saved; attempt++)
             {
@@ -99,7 +101,8 @@ internal sealed class EtlErrorEmails : IDisposable
                     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
                     var container = Container();
                     await container.CreateIfNotExistsAsync(cancellationToken: timeout.Token);
-                    await container.GetBlobClient(name).UploadAsync(BinaryData.FromObjectAsJson(item), overwrite: false, cancellationToken: timeout.Token);
+                    if ((await container.GetBlobClient(ReceiptName(name)).ExistsAsync(timeout.Token)).Value) { saved = true; break; }
+                    await container.GetBlobClient(name).UploadAsync(BinaryData.FromObjectAsJson(new EtlEmailEnvelope { Alert = item }), overwrite: false, cancellationToken: timeout.Token);
                     saved = true;
                 }
                 catch (RequestFailedException ex) when (ex.Status == 409 && ex.ErrorCode == "BlobAlreadyExists") { saved = true; } // prior attempt may have committed before timeout
@@ -133,8 +136,12 @@ internal sealed class EtlErrorEmails : IDisposable
                         initial ? CancellationToken.None : stopRecovery.Token);
                     var container = Container();
                     await container.CreateIfNotExistsAsync(cancellationToken: scan.Token);
-                    await foreach (var blob in container.GetBlobsAsync(prefix: prefix, cancellationToken: scan.Token))
+                    await foreach (var blob in container.GetBlobsAsync(traits: BlobTraits.Metadata, prefix: prefix, cancellationToken: scan.Token))
+                    {
+                        if (blob.Metadata.TryGetValue("deliveryState", out var state) && EtlEmailDelivery.Terminal(state)) continue;
+                        if (blob.Metadata.TryGetValue("nextAttempt", out var next) && DateTimeOffset.TryParse(next, out var due) && due > clock()) continue;
                         if (!ready.Writer.TryWrite(blob.Name)) break;
+                    }
                 }
                 catch (OperationCanceledException) when (stopRecovery.IsCancellationRequested) { return; }
                 catch (Exception ex) { Failure("recover", ex); }
@@ -162,7 +169,15 @@ internal sealed class EtlErrorEmails : IDisposable
                     catch (RequestFailedException ex) when (ex.Status is 404 or 409) { continue; }
                     try
                     {
-                        var item = (await blob.DownloadContentAsync(ct)).Value.Content.ToObjectFromJson<EtlAlert>();
+                        var container = Container();
+                        var receipt = container.GetBlobClient(ReceiptName(name));
+                        var content = (await blob.DownloadContentAsync(ct)).Value.Content;
+                        using var json = JsonDocument.Parse(content.ToMemory());
+                        bool legacy = !json.RootElement.TryGetProperty("Alert", out _);
+                        var envelope = legacy ? new EtlEmailEnvelope { Alert = content.ToObjectFromJson<EtlAlert>(), State = "review",
+                            LastError = "Legacy event has no persisted ACS operation identity. Automatic resend disabled; retained for review." }
+                            : content.ToObjectFromJson<EtlEmailEnvelope>();
+                        var item = envelope.Alert;
                         if (item.Category == "FileRetry")
                         {
                             // Drain notifications queued by the old policy without mailing routine retries.
@@ -170,11 +185,46 @@ internal sealed class EtlErrorEmails : IDisposable
                             log.LogInformation("Suppressed legacy FileRetry email for {File}; retry diagnostics remain in Function logs", item.File);
                             continue;
                         }
-                        var message = new AlertDigest(); message.Add(item);
-                        var body = Render(message, app, false);
-                        var operation = await sender(Recipients(), body.Subject, body.Text, body.Html, ct);
-                        await blob.DeleteAsync(conditions: new BlobRequestConditions { LeaseId = lease.LeaseId }, cancellationToken: ct);
-                        log.LogInformation("Individual ETL error email accepted by ACS: operation {OperationId}, category {Category}, site {Site}, file {File}", operation, item.Category, item.Site, item.File);
+                        async Task Save()
+                        {
+                            using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                            await blob.UploadAsync(BinaryData.FromObjectAsJson(envelope), new BlobUploadOptions
+                            {
+                                Conditions = new BlobRequestConditions { LeaseId = lease.LeaseId },
+                                Metadata = new Dictionary<string,string> { ["deliveryState"] = envelope.State, ["nextAttempt"] = envelope.NextAttempt.ToString("O") },
+                                HttpHeaders = new BlobHttpHeaders { ContentType = "application/json" }
+                            }, budget.Token);
+                        }
+                        if ((await receipt.ExistsAsync(ct)).Value)
+                        {
+                            await blob.DeleteAsync(conditions: new BlobRequestConditions { LeaseId = lease.LeaseId }, cancellationToken: ct);
+                            continue;
+                        }
+                        if (legacy)
+                        {
+                            await Save();
+                            log.LogWarning("Legacy email retained for review, not resubmitted: event {Event}, category {Category}, site {Site}", name, item.Category, item.Site);
+                            continue;
+                        }
+                        if (EtlEmailDelivery.Terminal(envelope.State) || envelope.NextAttempt > clock()) continue;
+                        if (envelope.Request == null)
+                        {
+                            var message = new AlertDigest(); message.Add(item);
+                            var body = Render(message, app, false);
+                            envelope.Request = new(Environment.GetEnvironmentVariable("EMAIL_FROM") ?? "fintechfuel@octopusdtl.com", Recipients(), body.Subject, body.Text, body.Html);
+                        }
+                        await EtlEmailDelivery.Advance(envelope, transport, Save, clock(), ct);
+                        if (envelope.State == "succeeded")
+                        {
+                            // Receipt must commit before deletion. A failed cleanup must never cause another POST.
+                            using var ack = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                            try { await receipt.UploadAsync(BinaryData.FromObjectAsJson(new { envelope.OperationId, CompletedAt = clock() }), overwrite: false, cancellationToken: ack.Token); }
+                            catch (RequestFailedException ex) when (ex.Status == 409 && ex.ErrorCode == "BlobAlreadyExists") { }
+                            await blob.DeleteAsync(conditions: new BlobRequestConditions { LeaseId = lease.LeaseId }, cancellationToken: ack.Token);
+                            log.LogInformation("ETL email completed: event {Event}, operation {Operation}, category {Category}, site {Site}", name, envelope.OperationId, item.Category, item.Site);
+                        }
+                        else log.LogWarning("ETL email deferred: event {Event}, operation {Operation}, state {State}, next {Next}, reason {Reason}. File processing continues.",
+                            name, envelope.OperationId, envelope.State, envelope.NextAttempt, envelope.LastError ?? "Awaiting ACS completion");
                     }
                     finally
                     {
@@ -187,6 +237,10 @@ internal sealed class EtlErrorEmails : IDisposable
         }
         catch (OperationCanceledException) when (stopSending.IsCancellationRequested) { }
     }
+
+    internal static string EventKey(EtlAlert item) => Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(
+        new { item.RunId, item.Category, item.Site, item.File }))).ToLowerInvariant();
+    private static string ReceiptName(string name) => name.Replace("/events/", "/sent/", StringComparison.Ordinal);
 
     private void Failure(string stage, Exception ex)
         => log.LogError("ETL email {Stage} failed: {Type}, code {Code}. ETL processing continues; consult Function logs.",

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Azure;
 using Azure.Storage.Blobs;
 using FintechEtl.FunctionApp;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -9,53 +10,83 @@ internal static class LiveEmailOutboxCheck
 {
     public static async Task Run()
     {
-        using var settings = JsonDocument.Parse(File.ReadAllText("local.settings.json"));
-        foreach (var key in new[] { "AzureWebJobsStorage", "ACS_EMAIL_CONNECTION_STRING", "EMAIL_RECIPIENTS", "EMAIL_FROM" })
-            Environment.SetEnvironmentVariable(key, settings.RootElement.GetProperty("Values").GetProperty(key).GetString());
-        Environment.SetEnvironmentVariable("EtlDryRun", "false");
-        Environment.SetEnvironmentVariable("EtlErrorEmailEnabled", "true");
-        var scope = "FintechEtl-OutboxCheck-" + Guid.NewGuid().ToString("N");
-        var prefix = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(scope + "/" +
-            (Environment.GetEnvironmentVariable("WEBSITE_SLOT_NAME") ?? "Production")))).ToLowerInvariant() + "/events/";
-        var container = new BlobContainerClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"), "fintech-etl-alerts");
-        int sends = 0;
-        var immediate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Task<string> FakeSend(string[] recipients, string subject, string text, string html, CancellationToken ct)
-        {
-            Interlocked.Increment(ref sends);
-            if (recipients.Length != 5 || !text.Contains("PSL.csv") || !text.Contains("Error/warning events: 1")) throw new Exception("Individual email contents or recipients incorrect.");
-            immediate.TrySetResult();
-            return Task.FromResult("SIMULATED-no-email-sent");
-        }
-        async Task<int> Pending()
-        {
-            int count = 0;
-            await foreach (var blob in container.GetBlobsAsync(prefix: prefix)) count++;
-            return count;
-        }
+        using var settings=JsonDocument.Parse(File.ReadAllText("local.settings.json"));
+        Environment.SetEnvironmentVariable("AzureWebJobsStorage",settings.RootElement.GetProperty("Values").GetProperty("AzureWebJobsStorage").GetString());
+        Environment.SetEnvironmentVariable("ACS_EMAIL_CONNECTION_STRING","SIMULATED-TRANSPORT-ONLY");
+        Environment.SetEnvironmentVariable("EMAIL_RECIPIENTS","simulated@example.com");
+        Environment.SetEnvironmentVariable("EtlDryRun","false");Environment.SetEnvironmentVariable("EtlErrorEmailEnabled","true");
+        var scope="FintechEtl-OutboxCheck-"+Guid.NewGuid().ToString("N");
+        var root=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(scope+"/"+(Environment.GetEnvironmentVariable("WEBSITE_SLOT_NAME")??"Production")))).ToLowerInvariant()+"/";
+        var prefix=root+"events/";
+        var container=new BlobContainerClient(Environment.GetEnvironmentVariable("AzureWebJobsStorage"),"fintech-etl-alerts");
+        var now=DateTimeOffset.UtcNow;
+        EtlErrorEmails Sender(string run,IEtlEmailTransport gateway)=>new(NullLogger.Instance,run,gateway,scope,()=>now);
+        async Task<List<string>> Names(){var result=new List<string>();await foreach(var blob in container.GetBlobsAsync(prefix:prefix))result.Add(blob.Name);return result;}
+        void Check(bool value,string message){if(!value)throw new Exception(message);Console.WriteLine("PASS live outbox: "+message);}
+        async Task<EtlEmailEnvelope> Read(string name)=>(await container.GetBlobClient(name).DownloadContentAsync()).Value.Content.ToObjectFromJson<EtlEmailEnvelope>();
         try
         {
-            using (var first = new EtlErrorEmails(NullLogger.Instance, "outbox-first", FakeSend, scope))
+            var fake=new FakeEtlEmailTransport();
+            using(var first=Sender("first",fake))
             {
-                first.Report("Partial", "007001", "first.tgz", "Synthetic check", "PSL.csv validation example");
-                // Proves delivery starts while invocation is still running, without Dispose or an interval tick.
-                await immediate.Task.WaitAsync(TimeSpan.FromSeconds(20));
-                first.Report("FileProcessingFailure", "007007", "second.zip", "Synthetic check", "PSL.csv retry example");
+                first.Report("Partial","900003","first.tgz","Synthetic check","PSL.csv empty");
+                first.Report("NotConfigured","007160","second.zip","Synthetic check","No mapping");
             }
-            if (sends != 2 || await Pending() != 0) throw new Exception("Errors were batched, throttled, or not individually acknowledged.");
-            Task<string> FailSend(string[] r, string s, string t, string h, CancellationToken ct) => throw new InvalidOperationException("Simulated ACS outage");
-            using (var failure = new EtlErrorEmails(NullLogger.Instance, "outbox-failure", FailSend, scope))
-                failure.Report("Partial", "007001", "retry.tgz", "Synthetic check", "PSL.csv example");
-            if (await Pending() != 1) throw new Exception("ACS failure discarded its individual persisted event.");
-            await container.GetBlobClient(prefix + "legacy-retry.json").UploadAsync(BinaryData.FromObjectAsJson(
-                new EtlAlert("FileRetry", "007001", "old.tgz", "Retained", "Old retry notification", "old-run", DateTimeOffset.UtcNow)), overwrite: false);
-            using (var recovery = new EtlErrorEmails(NullLogger.Instance, "outbox-recovery", FakeSend, scope)) { }
-            if (sends != 3 || await Pending() != 0) throw new Exception("Later run did not recover the permanent event or sent a suppressed legacy retry.");
-            Console.WriteLine("PASS live individual Blob outbox: immediate send before invocation end, separate messages, persistence, ACS failure retention and next-run recovery. Email sends simulated; no SQL/SFTP data accessed.");
+            Check(fake.Starts==2&&(await Names()).Count==2,"separate events submitted once and accepted operation IDs retained");
+            now=now.AddMinutes(1);using(var recover=Sender("recover",fake)){}
+            Check(fake.Starts==2&&fake.Polls==2&&(await Names()).Count==0,"restart polls existing operations; completed events drained");
+            using(var duplicate=Sender("first",fake)){duplicate.Report("Partial","900003","first.tgz","Synthetic check","PSL.csv empty");}
+            Check(fake.Starts==2&&(await Names()).Count==0,"same event is suppressed by durable receipt across restart");
+
+            var rejected=new FakeEtlEmailTransport{OnStart=_=>throw new RequestFailedException(429,"Simulated throttle","TooManyRequests",null)};
+            using(var failure=Sender("rejected",rejected)){failure.Report("Partial","900003","throttle.tgz","Synthetic","PSL.csv empty");}
+            var rejectedName=(await Names()).Single();var state=await Read(rejectedName);
+            Check(rejected.Starts==1&&state.State=="new"&&state.NextAttempt>=now.AddMinutes(5),"initial 429 is persisted with backoff");
+            now=now.AddMinutes(1);using(var early=Sender("early",rejected)){}
+            Check(rejected.Starts==1,"new invocation honors persisted retry time");
+            now=state.NextAttempt;rejected.OnStart=null;using(var retry=Sender("retry",rejected)){}
+            now=now.AddMinutes(1);using(var finish=Sender("finish",rejected)){}
+            Check(rejected.Starts==2&&(await Names()).Count==0,"rejected submission recovers once after throttle");
+
+            var ambiguous=new FakeEtlEmailTransport{OnStart=_=>throw new TaskCanceledException("Accepted but response lost")};
+            using(var lost=Sender("lost",ambiguous)){lost.Report("Partial","900003","lost.tgz","Synthetic","PSL.csv empty");}
+            var lostName=(await Names()).Single();var lostState=await Read(lostName);
+            Check(lostState.State=="submitting","unknown POST outcome retains operation identity");
+            now=now.AddMinutes(1);ambiguous.OnPoll=_=>throw new RequestFailedException(429,"Poll throttle","TooManyRequests",null);
+            using(var pollThrottled=Sender("poll-throttled",ambiguous)){}
+            var throttled=await Read(lostName);now=throttled.NextAttempt;ambiguous.OnPoll=null;
+            using(var recovered=Sender("recovered",ambiguous)){}
+            Check(ambiguous.Starts==1&&(await Names()).Count==0,"accepted email survives polling 429 without resubmission");
+            await container.GetBlobClient(lostName).UploadAsync(BinaryData.FromObjectAsJson(lostState),overwrite:false);
+            using(var cleanupRetry=Sender("cleanup-retry",ambiguous)){}
+            Check(ambiguous.Starts==1&&(await Names()).Count==0,"receipt protects a restored stale event after cleanup failure");
+
+            var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var concurrent=new FakeEtlEmailTransport{OnStart=async e=>{entered.TrySetResult();await release.Task;return e.OperationId.ToString();}};
+            var owner=Sender("concurrent",concurrent);
+            try
+            {
+                owner.Report("Partial","900003","concurrent.tgz","Synthetic","PSL.csv empty");
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(20));
+                using(var other=Sender("other-instance",concurrent)){}
+            }
+            finally{release.TrySetResult();owner.Dispose();}
+            Check(concurrent.Starts==1,"two live outbox instances honor blob lease; only one POST");
+            now=now.AddMinutes(1);using(var finish=Sender("concurrent-finish",concurrent)){}
+
+            var legacy=new EtlAlert("Partial","900003","legacy.tgz","Retained","PSL.csv","old-run",now);
+            await container.GetBlobClient(prefix+"legacy.json").UploadAsync(BinaryData.FromObjectAsJson(legacy),overwrite:false);
+            await container.GetBlobClient(prefix+"legacy-retry.json").UploadAsync(BinaryData.FromObjectAsJson(legacy with{Category="FileRetry"}),overwrite:false);
+            var legacyTransport=new FakeEtlEmailTransport();using(var recover=Sender("legacy-recovery",legacyTransport)){}
+            Check(legacyTransport.Starts==0&&(await Names()).Count==1&&(await Read(prefix+"legacy.json")).State=="review","legacy ambiguous event retained without resend; old routine retry suppressed");
+            using(var second=Sender("legacy-again",legacyTransport)){}
+            Check(legacyTransport.Starts==0,"review events are not retried every invocation");
+            Console.WriteLine("PASS real Azure Blob outbox integration; all ACS calls simulated. No real emails, SQL writes, SFTP operations or production event changes.");
         }
         finally
         {
-            await foreach (var blob in container.GetBlobsAsync(prefix: prefix)) await container.GetBlobClient(blob.Name).DeleteIfExistsAsync();
+            await foreach(var blob in container.GetBlobsAsync(prefix:root))await container.GetBlobClient(blob.Name).DeleteIfExistsAsync();
         }
     }
 }
