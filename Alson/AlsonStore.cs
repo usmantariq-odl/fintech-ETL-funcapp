@@ -120,27 +120,20 @@ AND a.IsActive=1 AND s.IsActive=1 AND s.DeviceTypeId=3
         int count=0;string detail=null;
         if(frame.Command=="00")
         {
-            var pump=Configuration(c,tx,!commit,"""
-SELECT m.ID,m.FC_PumpID,m.FC_NozzleID,t.ProdID_FK TankProductID FROM dbo.Omni_Fintech_PumpMapping m
-LEFT JOIN dbo.Omni_Fintech_TankMapping t ON t.Omni_SiteID=m.Omni_SiteID AND t.Omni_AssetID=m.Omni_TankID AND t.FC_TankID=m.FC_TankID
-WHERE m.MasterId COLLATE Latin1_General_100_BIN2=@master AND m.AlsonPumpCode COLLATE Latin1_General_100_BIN2=@code
-AND m.FC_NozzleID=@nozzle AND m.Omni_SiteID=@site AND m.FC_SiteID=@fc
-""",("@master",frame.Master),("@code",frame.Dispenser),("@nozzle",frame.Nozzle),("@site",siteId),("@fc",fcSite));
+            var pump=Configuration(c,tx,!commit,TransactionPumpConfigurationSql,
+                ("@master",frame.Master),("@code",frame.Dispenser),("@nozzle",frame.Nozzle),("@site",siteId),("@fc",fcSite),("@customer",site["Customer_Id_FK"]));
             var product=Configuration(c,tx,!commit,"""
 SELECT m.AlsonGradeID,p.product_name,p.product_id CanonicalProductID FROM dbo.Alson_Fintech_ProductMap m
 JOIN dbo.Omni_Fintech_Products p ON p.Id=m.ProductRowID AND p.OmniCustomerID_FK=m.CustomerID
 WHERE m.CustomerID=@customer AND m.OmniSiteID=@site AND m.RawCode=@code
 """,("@customer",site["Customer_Id_FK"]),("@site",siteId),("@code",frame.Product));
             if(Value(pump,"FC_PumpID")==null||Value(pump,"FC_NozzleID")==null)throw new AlsonPendingException("Missing numeric pump/nozzle mapping.");
-            if(Value(product,"AlsonGradeID")==null||Convert.ToInt32(product["AlsonGradeID"])<=0)
-                throw new AlsonPendingException("Alson product code has no configured AlsonGradeID.");
-            if(Value(pump,"TankProductID")!=null&&Convert.ToInt32(pump["TankProductID"])!=Convert.ToInt32(product["CanonicalProductID"]))
-                throw new AlsonPendingException("Sale product disagrees with the nozzle's configured tank product.");
+            int grade=TransactionProductNumber(pump,product);
             using var sale=Command(c,tx,"""
 INSERT dbo.Fintech_Transactions(Site_ID,FC_SiteID,Sale_ID,Pump_ID,Hose_ID,Grade_ID,Article,Volume,Money,PPU,End_Date,End_Time,FC_EndDateTime,CreatedOn,CreatedBy,IsManualSite,Final_Volume)
 OUTPUT INSERTED.ID VALUES(@site,@fc,@sale,@pump,@hose,@grade,@article,@volume,@money,@ppu,@date,@time,@at,SYSUTCDATETIME(),'AlsonETL',NULL,@final)
 """,("@site",siteId),("@fc",fcSite),("@sale",int.Parse(frame.RecordId,CultureInfo.InvariantCulture)),("@pump",pump["FC_PumpID"]),("@hose",pump["FC_NozzleID"]),
-                ("@grade",product["AlsonGradeID"]),("@article",product["product_name"]),("@volume",(double)frame.Volume.Value),("@money",(double)frame.Amount.Value),("@ppu",(double)frame.Price.Value),
+                ("@grade",grade),("@article",pump["product_name"]),("@volume",(double)frame.Volume.Value),("@money",(double)frame.Amount.Value),("@ppu",(double)frame.Price.Value),
                 ("@date",frame.At.Date),("@time",frame.At.TimeOfDay),("@at",frame.At),("@final",(double)frame.Totalizer.Value));
             if(commit)Link("TXN",Convert.ToInt32(pump["ID"]),Convert.ToInt32(sale.ExecuteScalar()));count=1;
         }
@@ -178,7 +171,22 @@ OUTPUT INSERTED.ID VALUES(@site,@fc,@tank,@asset,@product,@name,@fh,@fv,@wh,@wv,
         }
     }
     // Tank SPs join Product_Number to TankMapping.ProdID_FK / Products.product_id.
-    // AlsonGradeID is site-specific and remains the transaction Grade_ID only.
+    // Both target tables use the shared Fintech product number. Native grades stay in ProductMap/raw audit.
+    internal const string TransactionPumpConfigurationSql="""
+SELECT m.ID,m.FC_PumpID,m.FC_NozzleID,t.ProdID_FK,p.product_id TargetProductNumber,p.product_name
+FROM dbo.Omni_Fintech_PumpMapping m
+LEFT JOIN dbo.Omni_Fintech_TankMapping t ON t.Omni_SiteID=m.Omni_SiteID AND t.Omni_AssetID=m.Omni_TankID AND t.FC_TankID=m.FC_TankID AND t.FC_SiteID=m.FC_SiteID
+LEFT JOIN dbo.Omni_Fintech_Products p ON p.product_id=t.ProdID_FK AND p.OmniCustomerID_FK=@customer
+WHERE m.MasterId COLLATE Latin1_General_100_BIN2=@master AND m.AlsonPumpCode COLLATE Latin1_General_100_BIN2=@code
+AND m.FC_NozzleID=@nozzle AND m.Omni_SiteID=@site AND m.FC_SiteID=@fc
+""";
+    internal static int TransactionProductNumber(DataRow pump,DataRow sourceProduct)
+    {
+        int number=TankProductNumber(pump);
+        if(Value(sourceProduct,"CanonicalProductID")==null||Convert.ToInt32(sourceProduct["CanonicalProductID"])!=number)
+            throw new AlsonPendingException("Sale product disagrees with the nozzle's configured tank product.");
+        return number;
+    }
     internal const string TankConfigurationSql="""
 SELECT q.*,m.FC_TankID,m.Omni_AssetID,m.ProdID_FK,p.product_name,p.product_id TargetProductNumber FROM dbo.Alson_Fintech_ProbeConfig q
 JOIN dbo.Omni_Fintech_TankMapping m ON m.ID=q.TankMappingID

@@ -22,6 +22,18 @@ internal static class AlsonChecks
                 Assert(rejected,"Invalid tank product was accepted.");
             }
         });
+        Test("transaction grade follows the nozzle tank's shared product, never the native Alson grade",()=>
+        {
+            var tanks=new System.Data.DataTable();tanks.Columns.Add("TargetProductNumber",typeof(int));tanks.Columns.Add("ProdID_FK",typeof(int));tanks.Columns.Add("product_name",typeof(string));
+            var sources=new System.Data.DataTable();sources.Columns.Add("CanonicalProductID",typeof(int));sources.Columns.Add("AlsonGradeID",typeof(int));
+            foreach(var pair in new[]{(1,3),(1,2),(2,3),(3,1),(17,9)})
+                Assert(AlsonStore.TransactionProductNumber(tanks.Rows.Add(pair.Item1,pair.Item1,"Mapped product"),sources.Rows.Add(pair.Item1,pair.Item2))==pair.Item1,"Native grade leaked into target.");
+            foreach(var pair in new[]{(tanks.Rows.Add(1,1,"Hi Super"),sources.Rows.Add(2,3)),(tanks.Rows.Add(DBNull.Value,1,"Missing"),sources.Rows.Add(1,3)),(tanks.Rows.Add(1,1,"Hi Super"),sources.Rows.Add(DBNull.Value,3))})
+            {
+                bool rejected=false;try{AlsonStore.TransactionProductNumber(pair.Item1,pair.Item2);}catch(AlsonPendingException){rejected=true;}
+                Assert(rejected,"Unresolved or contradictory transaction mapping accepted.");
+            }
+        });
         Test("failure audit binds NULL frame hashes as binary rather than inferred nvarchar",()=>
         {
             var missing=AlsonStore.FrameHashParameter(null);

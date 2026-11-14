@@ -76,8 +76,8 @@ WHERE r.EntityType='TXN' AND r.SiteID IN(1191,1192)
                            Convert.ToInt32(row["Hose_ID"])!=saleReading.Nozzle||
                            (DateTime)row["FC_EndDateTime"]!=saleReading.At)
                             throw new Exception("Sale differs from original frame/mapping.");
-                        bool makkah=Convert.ToInt32(row["Site_ID"])==1191;
-                        int grade=saleReading.Product switch{"R"=>makkah?3:2,"D"=>makkah?2:3,"H"=>1,_=>throw new Exception("Unknown product")};
+                        // Target grade is the shared Fintech ID, independent of native site grade.
+                        int grade=saleReading.Product switch{"R"=>1,"D"=>2,"H"=>3,_=>throw new Exception("Unknown product")};
                         if(Convert.ToInt32(row["Grade_ID"])!=grade)throw new Exception("Wrong product grade.");
                         foreach(var name in new[]{"Start_Date","Start_Time","FC_StartDateTime","Initial_Volume","Payment_Type","Sale_Type","Sale_Auth","Authorizer","Preset_Amount","Level","UnitPrice","IsManualSite","ProcessedFileID"})
                             if(!row.IsNull(name))throw new Exception("Unsupported sale field fabricated: "+name);
@@ -85,7 +85,7 @@ WHERE r.EntityType='TXN' AND r.SiteID IN(1191,1192)
                     Check(true,"all 100 sale values, product IDs, source timestamps and unsupported NULL fields verified");
                 }
                 using(var cmd=new SqlCommand("""
-SELECT t.*,f.RawFrame,q.ProbeCode,m.FC_TankID,p.product_name ExpectedProduct,pm.AlsonGradeID ExpectedGrade FROM dbo.Alson_Fintech_Rows r
+SELECT t.*,f.RawFrame,q.ProbeCode,m.FC_TankID,p.product_name ExpectedProduct,p.product_id ExpectedGrade FROM dbo.Alson_Fintech_Rows r
 JOIN dbo.Alson_Fintech_Frames f ON f.FrameHash=r.FrameHash
 JOIN dbo.Fintech_TankLevels t ON t.ID=r.TargetID AND t.Site_ID=r.SiteID
 JOIN dbo.Alson_Fintech_ProbeConfig q ON q.TankMappingID=r.MappingID
@@ -130,11 +130,11 @@ WHERE r.EntityType='ATG' AND r.SiteID IN(1191,1192)
                 catch(InvalidOperationException ex)when(ex.Message.Contains("changed content")){}
                 Check(true,"same filename with changed content preserves original audit and fails");
                 foreach(var item in new[]{
-                    (Site:1191,Master:"81C3C8CBD19",Channel:"0@",Code:"R",Grade:3,Name:"Hi Super"),
+                    (Site:1191,Master:"81C3C8CBD19",Channel:"0@",Code:"R",Grade:1,Name:"Hi Super"),
                     (Site:1191,Master:"81C3C8CBD19",Channel:"0J",Code:"D",Grade:2,Name:"Diesel"),
-                    (Site:1192,Master:"81C3C8CE581",Channel:"0P",Code:"H",Grade:1,Name:"Excellium"),
-                    (Site:1192,Master:"81C3C8CE581",Channel:"0B",Code:"R",Grade:2,Name:"Hi Super"),
-                    (Site:1192,Master:"81C3C8CE581",Channel:"0@",Code:"D",Grade:3,Name:"Diesel")})
+                    (Site:1192,Master:"81C3C8CE581",Channel:"0P",Code:"H",Grade:3,Name:"Excellium"),
+                    (Site:1192,Master:"81C3C8CE581",Channel:"0B",Code:"R",Grade:1,Name:"Hi Super"),
+                    (Site:1192,Master:"81C3C8CE581",Channel:"0@",Code:"D",Grade:2,Name:"Diesel")})
                 {
                     int saleID=2147483003+item.Grade+(item.Site==1191?0:10);
                     var validationBody=AlsonChecks.Envelope($"#00,{saleID},{item.Master},{item.Channel},1,{item.Code},1,2,2,3,12:00:00,2026-11-07,No|");

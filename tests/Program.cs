@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 if(args.Contains("--live-alson-check")){LiveAlsonChecks.Run();return;}
 if(args.Contains("--live-alson-tank-product-check")){LiveAlsonTankProductChecks.Run(args[1]);return;}
+if(args.Contains("--live-alson-transaction-product-check")){LiveAlsonTransactionProductChecks.Run(args[1]);return;}
 if(args.Contains("--live-alson-failure-audit-check")){LiveAlsonFailureAuditChecks.Run(args[1]);return;}
 if(args.Contains("--live-alson-diagnostics-check")){LiveAlsonDiagnosticChecks.Run();return;}
 

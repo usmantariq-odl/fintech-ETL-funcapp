@@ -28,7 +28,7 @@ NEW Manzoor Site_ID 1192 / FC_SiteID 560256. Existing inactive Makka FS and test
 * ProductMap is site-specific: (CustomerID,OmniSiteID,RawCode). Makkah H=1 Excellium,
   D=2 Diesel,R=3 Hi Super; Manzoor H=1 Excellium,R=2 Hi Super,D=3 Diesel.
   Shared customer products remain canonical 1 Hi Super,2 Diesel,3 Excellium; ProductRowID
-  links to their unchanged rows. Transaction Grade_ID uses the site's Alson grade; ATG Product_Number uses the shared Products.product_id configured in TankMapping.ProdID_FK.
+  links to their unchanged rows. Both transaction Grade_ID and ATG Product_Number use the shared Products.product_id configured in TankMapping.ProdID_FK.
   TankMapping.ProdID_FK remains canonical. Dashboard/API changes are separate follow-up.
 * Fuel→Product_Volume and water→Water_Volume, scale 1. Heights remain NULL.
   Probe configuration now bounds volumes by actual tank capacity. A changed fixed probe
@@ -224,7 +224,7 @@ audits with a unique synthetic batch and removes only its test audit/batch after
 ATG product correction (13 November 2026 PKT): tank product numbers now come from the
 customer-scoped shared product joined to the configured tank, not AlsonGradeID.
 Missing/ambiguous products stay pending. The lookup has no hard-coded site or grade IDs.
-Transactions continue to retain their native Alson Grade_ID.
+This earlier ATG-only change is superseded by the transaction correction below.
 `deployment/Correct-AlsonTankProductNumbers.sql` defaults to PREVIEW. APPLY corrects
 only audited Alson ATG rows for customer 227 / sites 1191 and 1192 and updates their
 audit snapshots. Before/after numbers are retained in Alson_Fintech_Batches.Manifest
@@ -232,3 +232,21 @@ under Kind=tank-product-fix. ROLLBACK with the same BatchID restores only those 
 refusing rows whose corrected product number changed. Measurements are never updated.
 Stop/revert the new writer before rollback if reverting the deployment too; rollback
 covers the recorded historical correction, not readings imported later.
+
+## Transaction product correction, 13 November 2026
+Both target columns now use the shared Fintech product ID: Fintech_Transactions.Grade_ID
+and Fintech_TankLevels.Product_Number. The transaction writer follows exact configured
+master/channel/nozzle -> PumpMapping -> TankMapping.ProdID_FK -> customer Products.product_id.
+ProductMap decodes the raw R/D/H product and must agree with the mapped tank product.
+A missing/ambiguous mapping or conflicting source product stays pending; no grade is guessed.
+There are no hard-coded site/grade IDs in the writer. Native AlsonGradeID remains in
+ProductMap and original frames remain unchanged. APIs/reconciliation should use shared IDs
+from target tables; they must not translate those IDs again as native Alson grades.
+Correct-AlsonTransactionProductIds.sql defaults to PREVIEW. APPLY is limited to Alson-owned,
+audited transactions for customer227/sites1191,1192 and records old/new Grade_ID in
+Alson_Fintech_Batches.Manifest under Kind txn-product-fix. It cross-checks each source
+product code, pump/nozzle/tank/product mapping and audit grade before changing anything.
+Only Grade_ID and its audit snapshot property are corrected. Rollback uses the same batch;
+Rollback-AlsonTransactionProductIds.sql is the ready-to-run historical rollback script.
+Future imports are handled by the generic writer. Historical hourly aggregates/reconciliation
+must be rebuilt by their owner if previously calculated with native grade IDs.
